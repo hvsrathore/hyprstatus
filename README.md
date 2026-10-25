@@ -4,6 +4,7 @@
 
 ### Ultra-Fast, Zero-Bloat, Native Status Bar for Hyprland
 
+[![Crates.io](https://img.shields.io/crates/v/hyprstatus.svg?style=for-the-badge&logo=rust)](https://crates.io/crates/hyprstatus)
 [![Rust](https://img.shields.io/badge/Language-Rust_2021-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![Wayland](https://img.shields.io/badge/Protocol-wlr__layer__shell__v1-blue.svg?style=for-the-badge&logo=wayland)](https://wayland.freedesktop.org/)
 [![Hyprland](https://img.shields.io/badge/Compositor-Hyprland_Lua_%26_IPC-00a884.svg?style=for-the-badge&logo=hyprland)](https://hyprland.org)
@@ -311,7 +312,14 @@ sudo dnf install rust cargo pipewire-devel wayland-devel grim slurp wl-clipboard
 sudo apt install rustc cargo libpipewire-0.3-dev libwayland-dev grim slurp wl-clipboard wofi libnotify-bin fonts-jetbrains-mono
 ```
 
-### 2. Build from Source
+### 2. Install
+
+#### From crates.io:
+```bash
+cargo install hyprstatus
+```
+
+#### From Source:
 ```bash
 # Clone the repository
 git clone https://github.com/hvsrathore/hyprstatus.git
