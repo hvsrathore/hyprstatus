@@ -30,6 +30,30 @@ pub struct HyprWorkspace {
     pub lastwindowtitle: String,
 }
 
+fn deserialize_bool_or_int<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Visitor;
+    struct BoolOrIntVisitor;
+    impl<'de> Visitor<'de> for BoolOrIntVisitor {
+        type Value = bool;
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a boolean or an integer")
+        }
+        fn visit_bool<E>(self, v: bool) -> Result<bool, E> {
+            Ok(v)
+        }
+        fn visit_i64<E>(self, v: i64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+        fn visit_u64<E>(self, v: u64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+    }
+    deserializer.deserialize_any(BoolOrIntVisitor)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[allow(non_snake_case)]
 pub struct HyprClient {
@@ -48,6 +72,7 @@ pub struct HyprClient {
     pub pid: i32,
     pub xwayland: bool,
     pub pinned: bool,
+    #[serde(default, deserialize_with = "deserialize_bool_or_int")]
     pub fullscreen: bool,
     pub fullscreenClient: Option<i32>,
     pub grouped: Option<Vec<String>>,
@@ -313,7 +338,9 @@ impl HyprlandIpc {
                                         }
                                         let _ = event_tx.send(HyprEvent::ActiveWindowChanged { class, title });
                                     }
-                                    "openwindow" | "closewindow" | "movewindow" => {
+                                    "openwindow" | "closewindow" | "movewindow" | "movewindowv2"
+                                    | "windowtitle" | "windowtitlev2" | "changefloatingmode"
+                                    | "fullscreen" | "pin" => {
                                         Self::refresh_state(&state).await;
                                         let _ = event_tx.send(HyprEvent::LayoutConfigChanged);
                                     }
@@ -337,5 +364,17 @@ impl HyprlandIpc {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_query_clients() {
+        let clients = HyprlandIpc::query_clients().await;
+        println!("SUCCESS parsed {} clients: {:?}", clients.len(), clients);
+        assert!(!clients.is_empty());
     }
 }
