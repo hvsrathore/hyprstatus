@@ -11,9 +11,9 @@ A blazing-fast, zero-bloat, i3-style status bar daemon designed specifically for
 - **Blazing Fast & Zero Bloat**: Pure Rust software renderer directly rasterizing pixels into `wl_shm` shared memory with zero intermediate rendering engines or WebKit bloat.
 - **WLR Layer Shell Native**: Uses the `zwlr_layer_shell_v1` protocol to anchor exclusive top/bottom panels with precise multi-monitor layout management.
 - **Dynamic Multi-Monitor & Hot-Plugging**: Automatically tracks `wl_output` additions and removals, maintaining independent rendering loops and per-output configuration overrides (e.g. `[output.HDMI-A-1]`).
-- **Interactive Workspace Thumbnails**: Hovering over workspace pills reveals miniature floating wireframe application previews; clicking any preview thumbnail immediately dispatches focus to that window via Hyprland IPC.
+- **Interactive Workspace Thumbnails**: Hovering over workspace pills reveals miniature floating wireframe application previews; clicking any preview thumbnail immediately dispatches focus to that window via Hyprland IPC. Full support for modern Hyprland Lua (`hl.dsp.focus`) dispatching and legacy IPC.
 - **Real-Time PipeWire Audio**: Built-in native PipeWire client thread monitoring default sink/source node states, volume levels, mute toggles, and microphone activity. Supports scroll-wheel volume adjustments and click-to-mute.
-- **Netlink Network & Wi-Fi Monitor**: Asynchronous netlink interface monitoring and real-time delta throughput calculations from `/proc/net/dev`. Displays dynamic signal strength icons (`󰤨`, `󰤥`, `󰤢`, `󰤟`, `󰤮`), active SSID, and connection type (Ethernet `󰈀` vs Wi-Fi). Click to launch `nmtui`.
+- **Netlink Network & Wi-Fi Modal**: Asynchronous netlink interface monitoring and real-time throughput calculations. Displays dynamic signal strength icons (`󰤨`, `󰤥`, `󰤢`, `󰤟`, `󰤮`), active SSID, and connection type (Ethernet `󰈀` vs Wi-Fi). Clicking opens an interactive Wi-Fi modal showing available networks, signal strength, and instant connection prompts.
 - **Sysfs Battery & Power Management**: Direct sysfs metrics parsing (`/sys/class/power_supply/BAT*/*` and `AC`) for charging status, percentage, wattage, and time estimates, with automated desktop notifications below 15%.
 - **Braille Performance Sparklines**: Samples `/proc/stat` and `/proc/meminfo` into rolling ring buffers, rasterizing smooth inline Unicode Braille performance graphs (e.g., `⣀⣤⣾⣿`) for CPU utilization and RAM usage without external processes.
 - **StatusNotifierItem (SNI) System Tray**: Implements the FreeDesktop `org.kde.StatusNotifierWatcher` and `org.kde.StatusNotifierItem` DBus interfaces via `zbus`, allowing background applications (Nextcloud, Discord, Steam, etc.) to register clickable tray icons with custom pixmaps.
@@ -151,12 +151,13 @@ right = ["tray", "network", "audio", "battery", "clock"]
 | Target | Event | Action |
 |---|---|---|
 | **Workspace Pill** | Left Click | Switches active workspace directly |
+| **Workspace Pill** | Scroll Wheel Up / Down | Cycles to previous / next workspace |
 | **Workspace Pill** | Hover | Opens live interactive window preview popup |
 | **Workspace Popup** | Left Click on thumbnail | Dispatches focus directly to the target window |
 | **Audio Block** | Left Click | Toggles master speaker mute |
 | **Audio Block** | Right Click | Toggles microphone mute |
 | **Audio Block** | Scroll Wheel Up / Down | Adjusts volume by ±5% |
-| **Network Block** | Left Click | Launches `nmtui` in terminal |
+| **Network Block** | Left Click | Opens interactive Wi-Fi selection modal or configured launcher |
 | **Perf Block** | Left Click | Launches `btop` / `htop` system monitor |
 | **Tray Icon** | Left Click | Forwards `Activate` DBus method to application |
 | **Tray Icon** | Right Click | Forwards `ContextMenu` DBus method to application |
@@ -180,7 +181,15 @@ cargo build --release
 ./target/release/hyprstatus
 ```
 
-### Hyprland Auto-start (`hyprland.conf`)
+### Hyprland Auto-start
+
+#### Hyprland with Lua configuration (`hyprland.lua`)
+Add the following line to `~/.config/hypr/hyprland.lua`:
+```lua
+hl.exec_cmd("/path/to/hyprstatus")
+```
+
+#### Legacy Hyprland configuration (`hyprland.conf`)
 Add the following line to `~/.config/hypr/hyprland.conf`:
 ```ini
 exec-once = /path/to/hyprstatus

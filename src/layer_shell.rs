@@ -555,10 +555,13 @@ impl BarState {
     }
 
     pub fn handle_pointer_click(&mut self, qh: &QueueHandle<Self>, button: MouseButton, x: i32, y: i32) {
-        // First check if click lands on any active workspace popup
+        // If click is on a popup surface, check popup window thumbnail clicks
         for bar in self.bars.values() {
-            if bar.popup.visible && bar.popup.handle_click(x, y) {
-                return;
+            if bar.popup.visible && bar.popup_surface.as_ref() == self.pointer_surface.as_ref() {
+                if bar.popup.handle_click(x, y) {
+                    self.hide_workspace_popup();
+                    return;
+                }
             }
         }
 
@@ -570,9 +573,24 @@ impl BarState {
                     match &cr.action {
                         ClickAction::SwitchWorkspace(id) => {
                             let ws_id = *id;
-                            tokio::spawn(async move {
-                                let _ = HyprlandIpc::switch_workspace(ws_id).await;
-                            });
+                            match button {
+                                MouseButton::ScrollUp => {
+                                    tokio::spawn(async move {
+                                        let _ = HyprlandIpc::cycle_workspace(false).await;
+                                    });
+                                }
+                                MouseButton::ScrollDown => {
+                                    tokio::spawn(async move {
+                                        let _ = HyprlandIpc::cycle_workspace(true).await;
+                                    });
+                                }
+                                _ => {
+                                    self.hide_workspace_popup();
+                                    tokio::spawn(async move {
+                                        let _ = HyprlandIpc::switch_workspace(ws_id).await;
+                                    });
+                                }
+                            }
                             return;
                         }
                         ClickAction::ToggleAudioMute => {

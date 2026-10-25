@@ -167,8 +167,33 @@ impl HyprlandIpc {
     }
 
     pub async fn dispatch(cmd: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // If it's a legacy workspace or focuswindow command, try Hyprland 0.56+ Lua dispatch first
+        if let Some(target) = cmd.strip_prefix("workspace ") {
+            let lua_cmd = if let Ok(id) = target.trim().parse::<i32>() {
+                format!("dispatch hl.dsp.focus({{workspace = {}}})", id)
+            } else {
+                format!("dispatch hl.dsp.focus({{workspace = \"{}\"}})", target.trim())
+            };
+            if let Ok(res) = Self::send_command(&lua_cmd).await {
+                if res.trim() == "ok" {
+                    return Ok(());
+                }
+            }
+        } else if let Some(target) = cmd.strip_prefix("focuswindow ") {
+            let addr = target.trim();
+            let lua_cmd = format!("dispatch hl.dsp.focus({{window = '{}'}})", addr);
+            if let Ok(res) = Self::send_command(&lua_cmd).await {
+                if res.trim() == "ok" {
+                    return Ok(());
+                }
+            }
+        }
+
         let full_cmd = format!("dispatch {}", cmd);
-        let _ = Self::send_command(&full_cmd).await?;
+        let res = Self::send_command(&full_cmd).await?;
+        if res.starts_with("error:") {
+            eprintln!("[ipc] Dispatch returned error: {}", res);
+        }
         Ok(())
     }
 
@@ -178,11 +203,39 @@ impl HyprlandIpc {
         } else {
             format!("0x{}", address)
         };
+        // Hyprland 0.56+ Lua dispatch syntax
+        let lua_cmd = format!("dispatch hl.dsp.focus({{window = 'address:{}'}})", addr);
+        if let Ok(res) = Self::send_command(&lua_cmd).await {
+            if res.trim() == "ok" {
+                return Ok(());
+            }
+        }
+        // Fallback for pre-0.56 Hyprland
         Self::dispatch(&format!("focuswindow address:{}", addr)).await
     }
 
     pub async fn switch_workspace(id: i32) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Hyprland 0.56+ Lua dispatch syntax
+        let lua_cmd = format!("dispatch hl.dsp.focus({{workspace = {}}})", id);
+        if let Ok(res) = Self::send_command(&lua_cmd).await {
+            if res.trim() == "ok" {
+                return Ok(());
+            }
+        }
+        // Fallback for pre-0.56 Hyprland
         Self::dispatch(&format!("workspace {}", id)).await
+    }
+
+    pub async fn cycle_workspace(next: bool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let rel = if next { "m+1" } else { "m-1" };
+        let lua_cmd = format!("dispatch hl.dsp.focus({{workspace = \"{}\"}})", rel);
+        if let Ok(res) = Self::send_command(&lua_cmd).await {
+            if res.trim() == "ok" {
+                return Ok(());
+            }
+        }
+        // Fallback for pre-0.56 Hyprland
+        Self::dispatch(&format!("workspace {}", rel)).await
     }
 
     pub async fn query_workspaces() -> Vec<HyprWorkspace> {
@@ -376,5 +429,12 @@ mod tests {
         let clients = HyprlandIpc::query_clients().await;
         println!("SUCCESS parsed {} clients: {:?}", clients.len(), clients);
         assert!(!clients.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_switch_workspace() {
+        // Query active workspace
+        let res = HyprlandIpc::switch_workspace(3).await;
+        assert!(res.is_ok(), "switch_workspace to 3 failed: {:?}", res);
     }
 }
