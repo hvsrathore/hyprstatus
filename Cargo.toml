@@ -1,7 +1,16 @@
 [package]
 name = "hyprstatus"
-version = "0.1.0"
-edition = "2024"
+version = "1.0.0"
+edition = "2021"
+authors = ["Harsh Vardhan <4444hv@gmail.com>"]
+license = "MIT"
+description = "A blazing-fast, zero-bloat, i3-style status bar daemon designed specifically for Hyprland in pure Rust"
+repository = "https://github.com/hvsrathore/hyprstatus"
+homepage = "https://github.com/hvsrathore/hyprstatus"
+documentation = "https://docs.rs/hyprstatus"
+readme = "README.md"
+keywords = ["hyprland", "status-bar", "wayland", "i3status", "pipewire"]
+categories = ["command-line-utilities", "gui"]
 
 [dependencies]
 fontdue = "0.9.5"

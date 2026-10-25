@@ -1,0 +1,23 @@
+pkgbase = hyprstatus
+	pkgdesc = A blazing-fast, zero-bloat, i3-style status bar daemon designed specifically for Hyprland in pure Rust
+	pkgver = 1.0.0
+	pkgrel = 1
+	url = https://github.com/hvsrathore/hyprstatus
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	makedepends = rust
+	depends = wayland
+	depends = pipewire
+	depends = dbus
+	optdepends = grim: Full-screen and active monitor desktop screenshot capture
+	optdepends = slurp: Interactive area and region selection for screenshots
+	optdepends = wl-clipboard: Automatic screenshot clipboard copying
+	optdepends = wofi: Native Wayland Wi-Fi password prompt dialog
+	optdepends = libnotify: Desktop notification banners with thumbnail previews
+	optdepends = ttf-jetbrains-mono-nerd: Default Nerd Font glyphs, icons, and sparklines
+	source = hyprstatus-1.0.0.tar.gz::https://github.com/hvsrathore/hyprstatus/archive/refs/tags/v1.0.0.tar.gz
+	sha256sums = 7c48573929ad00e6355e6acb062ca34e493b85b8f9e12d2164d4402781acc50e
+
+pkgname = hyprstatus

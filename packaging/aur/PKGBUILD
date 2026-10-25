@@ -1,0 +1,46 @@
+# Maintainer: Harsh Vardhan <4444hv@gmail.com>
+pkgname=hyprstatus
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="A blazing-fast, zero-bloat, i3-style status bar daemon designed specifically for Hyprland in pure Rust"
+arch=('x86_64' 'aarch64')
+url="https://github.com/hvsrathore/hyprstatus"
+license=('MIT')
+depends=('wayland' 'pipewire' 'dbus')
+makedepends=('cargo' 'rust')
+optdepends=(
+    'grim: Full-screen and active monitor desktop screenshot capture'
+    'slurp: Interactive area and region selection for screenshots'
+    'wl-clipboard: Automatic screenshot clipboard copying'
+    'wofi: Native Wayland Wi-Fi password prompt dialog'
+    'libnotify: Desktop notification banners with thumbnail previews'
+    'ttf-jetbrains-mono-nerd: Default Nerd Font glyphs, icons, and sparklines'
+)
+source=("$pkgname-$pkgver.tar.gz::https://github.com/hvsrathore/hyprstatus/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('7c48573929ad00e6355e6acb062ca34e493b85b8f9e12d2164d4402781acc50e')
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')" 2>/dev/null || cargo fetch --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --release
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --release || true
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 "target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
