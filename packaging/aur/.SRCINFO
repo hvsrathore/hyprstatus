@@ -8,6 +8,7 @@ pkgbase = hyprstatus
 	license = MIT
 	makedepends = cargo
 	makedepends = rust
+	makedepends = clang
 	depends = wayland
 	depends = pipewire
 	depends = dbus

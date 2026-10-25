@@ -299,17 +299,17 @@ Ensure you have the required development libraries and Wayland tools installed o
 
 #### Arch Linux / EndeavourOS:
 ```bash
-sudo pacman -S rust cargo pipewire grim slurp wl-clipboard wofi notify-send ttf-jetbrains-mono-nerd
+sudo pacman -S rust cargo clang pipewire grim slurp wl-clipboard wofi notify-send ttf-jetbrains-mono-nerd
 ```
 
 #### Fedora:
 ```bash
-sudo dnf install rust cargo pipewire-devel wayland-devel grim slurp wl-clipboard wofi libnotify jetbrains-mono-fonts-all
+sudo dnf install rust cargo clang pipewire-devel wayland-devel grim slurp wl-clipboard wofi libnotify jetbrains-mono-fonts-all
 ```
 
 #### Ubuntu / Debian:
 ```bash
-sudo apt install rustc cargo libpipewire-0.3-dev libwayland-dev grim slurp wl-clipboard wofi libnotify-bin fonts-jetbrains-mono
+sudo apt install rustc cargo clang libclang-dev libpipewire-0.3-dev libwayland-dev grim slurp wl-clipboard wofi libnotify-bin fonts-jetbrains-mono
 ```
 
 ### 2. Install
