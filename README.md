@@ -4,7 +4,7 @@
 
 ### Ultra-Fast, Zero-Bloat, Native Status Bar for Hyprland
 
-[![Crates.io](https://img.shields.io/crates/v/hyprstatus.svg?style=for-the-badge&logo=rust)](https://crates.io/crates/hyprstatus)
+[![Crates.io](https://img.shields.io/crates/v/hyprstatus.svg?style=for-the-badge&logo=rust&cacheSeconds=0)](https://crates.io/crates/hyprstatus)
 [![Rust](https://img.shields.io/badge/Language-Rust_2021-orange.svg?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
 [![Wayland](https://img.shields.io/badge/Protocol-wlr__layer__shell__v1-blue.svg?style=for-the-badge&logo=wayland)](https://wayland.freedesktop.org/)
 [![Hyprland](https://img.shields.io/badge/Compositor-Hyprland_Lua_%26_IPC-00a884.svg?style=for-the-badge&logo=hyprland)](https://hyprland.org)
