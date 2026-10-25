@@ -25,7 +25,7 @@ impl Default for AudioState {
 
 #[derive(Clone)]
 pub struct AudioModule {
-    state: Arc<AudioState>,
+    pub state: Arc<AudioState>,
 }
 
 impl AudioModule {
@@ -37,7 +37,27 @@ impl AudioModule {
         module.spawn_pipewire_monitor(state.clone());
 
         // Spawn periodic poller to guarantee synchronization with pactl/pw-dump
-        module.spawn_periodic_sync(state);
+        module.spawn_periodic_sync(state.clone());
+
+        // Spawn real-time pactl subscribe listener
+        let sub_state = state;
+        tokio::spawn(async move {
+            let mut cmd = Command::new("pactl");
+            cmd.arg("subscribe");
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::null());
+            if let Ok(mut child) = cmd.spawn() {
+                if let Some(stdout) = child.stdout.take() {
+                    let reader = tokio::io::BufReader::new(stdout);
+                    let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        if line.contains("sink") || line.contains("source") || line.contains("server") {
+                            Self::query_pactl_audio(&sub_state).await;
+                        }
+                    }
+                }
+            }
+        });
 
         module
     }
@@ -155,7 +175,9 @@ impl AudioModule {
         self.state.volume.store(new_vol, Ordering::Relaxed);
         let _ = Command::new("pactl")
             .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("+{}%", step)])
-            .spawn();
+            .status()
+            .await;
+        Self::query_pactl_audio(&self.state).await;
     }
 
     pub async fn volume_down(&self, step: u32) {
@@ -164,7 +186,9 @@ impl AudioModule {
         self.state.volume.store(new_vol, Ordering::Relaxed);
         let _ = Command::new("pactl")
             .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("-{}%", step)])
-            .spawn();
+            .status()
+            .await;
+        Self::query_pactl_audio(&self.state).await;
     }
 
     pub async fn toggle_mute(&self) {
@@ -172,7 +196,9 @@ impl AudioModule {
         self.state.sink_muted.store(!cur, Ordering::Relaxed);
         let _ = Command::new("pactl")
             .args(["set-sink-mute", "@DEFAULT_SINK@", "toggle"])
-            .spawn();
+            .status()
+            .await;
+        Self::query_pactl_audio(&self.state).await;
     }
 
     pub async fn toggle_mic_mute(&self) {
@@ -180,7 +206,9 @@ impl AudioModule {
         self.state.source_muted.store(!cur, Ordering::Relaxed);
         let _ = Command::new("pactl")
             .args(["set-source-mute", "@DEFAULT_SOURCE@", "toggle"])
-            .spawn();
+            .status()
+            .await;
+        Self::query_pactl_audio(&self.state).await;
     }
 
     pub fn render(&self, config: &Config) -> ModuleBlock {

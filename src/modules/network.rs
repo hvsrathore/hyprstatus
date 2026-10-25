@@ -279,4 +279,288 @@ impl NetworkModule {
 
         block
     }
+
+    pub async fn open_wifi_modal() {
+        use tokio::process::Command;
+
+        let has_wofi = Command::new("which").arg("wofi").output().await.map(|o| o.status.success()).unwrap_or(false);
+        let has_rofi = Command::new("which").arg("rofi").output().await.map(|o| o.status.success()).unwrap_or(false);
+
+        if !has_wofi && !has_rofi {
+            let _ = Command::new("nm-connection-editor").spawn();
+            return;
+        }
+
+        let wifi_status = Command::new("nmcli")
+            .args(["radio", "wifi"])
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_else(|_| "enabled".to_string());
+
+        let is_wifi_enabled = wifi_status == "enabled";
+
+        struct WifiEntry {
+            in_use: bool,
+            ssid: String,
+            signal: u32,
+            security: String,
+            bars: String,
+        }
+
+        let mut networks: Vec<WifiEntry> = Vec::new();
+        let mut seen_ssids = std::collections::HashSet::new();
+
+        if is_wifi_enabled {
+            if let Ok(out) = Command::new("nmcli")
+                .args(["--terse", "--fields", "IN-USE,SSID,SIGNAL,SECURITY,BARS", "dev", "wifi", "list"])
+                .output()
+                .await
+            {
+                let text = String::from_utf8_lossy(&out.stdout);
+                for line in text.lines() {
+                    let parts: Vec<&str> = line.split(':').collect();
+                    if parts.len() >= 5 {
+                        let in_use = parts[0] == "*";
+                        let ssid = parts[1].trim().to_string();
+                        if ssid.is_empty() {
+                            continue;
+                        }
+                        let signal = parts[2].parse::<u32>().unwrap_or(0);
+                        let security = parts[3].trim().to_string();
+                        let bars = parts[4].trim().to_string();
+
+                        if seen_ssids.insert(ssid.clone()) {
+                            networks.push(WifiEntry {
+                                in_use,
+                                ssid,
+                                signal,
+                                security,
+                                bars,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        networks.sort_by(|a, b| {
+            b.in_use.cmp(&a.in_use).then_with(|| b.signal.cmp(&a.signal))
+        });
+
+        let mut menu_lines = Vec::new();
+
+        if is_wifi_enabled {
+            menu_lines.push("󰤮  Turn Wi-Fi OFF".to_string());
+            menu_lines.push("󰑐  Rescan Networks".to_string());
+        } else {
+            menu_lines.push("󰤨  Turn Wi-Fi ON".to_string());
+        }
+
+        for net in &networks {
+            let icon = if net.signal >= 80 {
+                "󰤨"
+            } else if net.signal >= 60 {
+                "󰤥"
+            } else if net.signal >= 40 {
+                "󰤢"
+            } else if net.signal >= 20 {
+                "󰤟"
+            } else {
+                "󰤮"
+            };
+
+            let status = if net.in_use { " [Connected]" } else { "" };
+            let sec = if net.security.is_empty() || net.security == "--" {
+                "Open".to_string()
+            } else {
+                net.security.clone()
+            };
+
+            menu_lines.push(format!(
+                "{}  {:<22}  {:>3}%  {:<4}  ({}){}",
+                icon, net.ssid, net.signal, net.bars, sec, status
+            ));
+        }
+
+        let input_str = menu_lines.join("\n");
+
+        let choice = if has_wofi {
+            Self::run_wofi_dmenu(&input_str, "Wi-Fi Networks", false).await
+        } else {
+            Self::run_rofi_dmenu(&input_str, "Wi-Fi Networks", false).await
+        };
+
+        let selection = match choice {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => return,
+        };
+
+        if selection.contains("Turn Wi-Fi OFF") {
+            let _ = Command::new("nmcli").args(["radio", "wifi", "off"]).output().await;
+            let _ = Command::new("notify-send")
+                .args(["-a", "hyprstatus", "Wi-Fi", "Wi-Fi radio disabled"])
+                .spawn();
+        } else if selection.contains("Turn Wi-Fi ON") {
+            let _ = Command::new("nmcli").args(["radio", "wifi", "on"]).output().await;
+            let _ = Command::new("notify-send")
+                .args(["-a", "hyprstatus", "Wi-Fi", "Wi-Fi radio enabled"])
+                .spawn();
+        } else if selection.contains("Rescan Networks") {
+            let _ = Command::new("nmcli").args(["dev", "wifi", "rescan"]).output().await;
+            Box::pin(Self::open_wifi_modal()).await;
+        } else {
+            for net in &networks {
+                if selection.contains(&net.ssid) {
+                    if net.in_use {
+                        let confirm_input = format!("Disconnect from {}\nCancel", net.ssid);
+                        let confirm_choice = if has_wofi {
+                            Self::run_wofi_dmenu(&confirm_input, "Disconnect?", false).await
+                        } else {
+                            Self::run_rofi_dmenu(&confirm_input, "Disconnect?", false).await
+                        };
+                        if let Some(c) = confirm_choice {
+                            if c.trim().starts_with("Disconnect") {
+                                let _ = Command::new("nmcli")
+                                    .args(["connection", "down", "id", &net.ssid])
+                                    .output()
+                                    .await;
+                                let _ = Command::new("notify-send")
+                                    .args(["-a", "hyprstatus", "Wi-Fi", &format!("Disconnected from {}", net.ssid)])
+                                    .spawn();
+                            }
+                        }
+                    } else {
+                        let is_saved = Command::new("nmcli")
+                            .args(["-t", "-f", "NAME", "connection", "show"])
+                            .output()
+                            .await
+                            .map(|o| {
+                                let text = String::from_utf8_lossy(&o.stdout);
+                                text.lines().any(|l| l.trim() == net.ssid)
+                            })
+                            .unwrap_or(false);
+
+                        let is_open = net.security.is_empty() || net.security == "--";
+
+                        if is_saved || is_open {
+                            let _ = Command::new("notify-send")
+                                .args(["-a", "hyprstatus", "Wi-Fi", &format!("Connecting to {}...", net.ssid)])
+                                .spawn();
+                            let res = Command::new("nmcli")
+                                .args(["dev", "wifi", "connect", &net.ssid])
+                                .output()
+                                .await;
+                            match res {
+                                Ok(o) if o.status.success() => {
+                                    let _ = Command::new("notify-send")
+                                        .args(["-a", "hyprstatus", "Wi-Fi", &format!("Connected to {}", net.ssid)])
+                                        .spawn();
+                                }
+                                Ok(o) => {
+                                    let err = String::from_utf8_lossy(&o.stderr);
+                                    let _ = Command::new("notify-send")
+                                        .args(["-a", "hyprstatus", "Wi-Fi Failed", err.trim()])
+                                        .spawn();
+                                }
+                                Err(e) => {
+                                    let _ = Command::new("notify-send")
+                                        .args(["-a", "hyprstatus", "Wi-Fi Error", &e.to_string()])
+                                        .spawn();
+                                }
+                            }
+                        } else {
+                            let pwd_choice = if has_wofi {
+                                Self::run_wofi_dmenu("", &format!("Password for {}:", net.ssid), true).await
+                            } else {
+                                Self::run_rofi_dmenu("", &format!("Password for {}:", net.ssid), true).await
+                            };
+
+                            if let Some(pwd) = pwd_choice {
+                                let pwd = pwd.trim();
+                                if !pwd.is_empty() {
+                                    let _ = Command::new("notify-send")
+                                        .args(["-a", "hyprstatus", "Wi-Fi", &format!("Connecting to {}...", net.ssid)])
+                                        .spawn();
+                                    let res = Command::new("nmcli")
+                                        .args(["dev", "wifi", "connect", &net.ssid, "password", pwd])
+                                        .output()
+                                        .await;
+                                    match res {
+                                        Ok(o) if o.status.success() => {
+                                            let _ = Command::new("notify-send")
+                                                .args(["-a", "hyprstatus", "Wi-Fi", &format!("Connected to {}", net.ssid)])
+                                                .spawn();
+                                        }
+                                        Ok(o) => {
+                                            let err = String::from_utf8_lossy(&o.stderr);
+                                            let _ = Command::new("notify-send")
+                                                .args(["-a", "hyprstatus", "Wi-Fi Failed", err.trim()])
+                                                .spawn();
+                                        }
+                                        Err(e) => {
+                                            let _ = Command::new("notify-send")
+                                                .args(["-a", "hyprstatus", "Wi-Fi Error", &e.to_string()])
+                                                .spawn();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    async fn run_wofi_dmenu(input: &str, prompt: &str, password: bool) -> Option<String> {
+        use tokio::io::AsyncWriteExt;
+        use tokio::process::Command;
+
+        let mut cmd = Command::new("wofi");
+        cmd.args(["--dmenu", "-p", prompt, "-i", "--width", "480", "--height", if password { "120" } else { "360" }]);
+        if password {
+            cmd.arg("--password");
+        }
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::null());
+
+        let mut child = cmd.spawn().ok()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(input.as_bytes()).await;
+        }
+        let output = child.wait_with_output().await.ok()?;
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            None
+        }
+    }
+
+    async fn run_rofi_dmenu(input: &str, prompt: &str, password: bool) -> Option<String> {
+        use tokio::io::AsyncWriteExt;
+        use tokio::process::Command;
+
+        let mut cmd = Command::new("rofi");
+        cmd.args(["-dmenu", "-p", prompt, "-i"]);
+        if password {
+            cmd.arg("-password");
+        }
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::null());
+
+        let mut child = cmd.spawn().ok()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(input.as_bytes()).await;
+        }
+        let output = child.wait_with_output().await.ok()?;
+        if output.status.success() {
+            Some(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            None
+        }
+    }
 }

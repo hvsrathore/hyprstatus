@@ -296,14 +296,14 @@ impl Default for NetworkConfig {
         Self {
             interface: None,
             format: "{icon} {ssid} {speed}".to_string(),
-            click_command: "nmtui".to_string(),
+            click_command: "hyprstatus --wifi-menu".to_string(),
         }
     }
 }
 
 fn default_interface() -> Option<String> { None }
 fn default_network_format() -> String { "{icon} {ssid}".to_string() }
-fn default_click_cmd() -> String { "alacritty -e nmtui".to_string() }
+fn default_click_cmd() -> String { "hyprstatus --wifi-menu".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatteryConfig {

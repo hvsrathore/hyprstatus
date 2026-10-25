@@ -236,7 +236,14 @@ impl HyprlandIpc {
                                         {
                                             let mut st = state.write().await;
                                             st.active_workspace = id;
+                                            for m in &mut st.monitors {
+                                                if m.focused {
+                                                    m.activeWorkspace.id = id;
+                                                    m.activeWorkspace.name = data.to_string();
+                                                }
+                                            }
                                         }
+                                        Self::refresh_state(&state).await;
                                         let _ = event_tx.send(HyprEvent::WorkspaceChanged {
                                             id,
                                             name: data.to_string(),
@@ -248,7 +255,14 @@ impl HyprlandIpc {
                                             {
                                                 let mut st = state.write().await;
                                                 st.active_workspace = id;
+                                                for m in &mut st.monitors {
+                                                    if m.focused {
+                                                        m.activeWorkspace.id = id;
+                                                        m.activeWorkspace.name = name.to_string();
+                                                    }
+                                                }
                                             }
+                                            Self::refresh_state(&state).await;
                                             let _ = event_tx.send(HyprEvent::WorkspaceChanged {
                                                 id,
                                                 name: name.to_string(),
@@ -261,12 +275,30 @@ impl HyprlandIpc {
                                             {
                                                 let mut st = state.write().await;
                                                 st.active_workspace = ws_id;
+                                                for m in &mut st.monitors {
+                                                    m.focused = m.name == mon;
+                                                    if m.name == mon {
+                                                        m.activeWorkspace.id = ws_id;
+                                                        m.activeWorkspace.name = ws_str.to_string();
+                                                    }
+                                                }
                                             }
+                                            Self::refresh_state(&state).await;
                                             let _ = event_tx.send(HyprEvent::FocusedMonitorChanged {
                                                 monitor: mon.to_string(),
                                                 workspace_id: ws_id,
                                             });
                                         }
+                                    }
+                                    "createworkspace" | "createworkspacev2"
+                                    | "destroyworkspace" | "destroyworkspacev2"
+                                    | "moveworkspace" | "moveworkspacev2"
+                                    | "activespecial" => {
+                                        Self::refresh_state(&state).await;
+                                        let _ = event_tx.send(HyprEvent::WorkspaceChanged {
+                                            id: 0,
+                                            name: String::new(),
+                                        });
                                     }
                                     "activewindow" => {
                                         let (class, title) = if let Some((c, t)) = data.split_once(',') {

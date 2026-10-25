@@ -554,7 +554,7 @@ impl BarState {
         bar.surface.commit();
     }
 
-    pub fn handle_pointer_click(&mut self, button: MouseButton, x: i32, y: i32) {
+    pub fn handle_pointer_click(&mut self, qh: &QueueHandle<Self>, button: MouseButton, x: i32, y: i32) {
         // First check if click lands on any active workspace popup
         for bar in self.bars.values() {
             if bar.popup.visible && bar.popup.handle_click(x, y) {
@@ -577,17 +577,47 @@ impl BarState {
                         }
                         ClickAction::ToggleAudioMute => {
                             let mod_audio = self.mod_audio.clone();
+                            let step = self.config.modules.audio.step_percent;
+                            match button {
+                                MouseButton::Right => {
+                                    let cur = mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
+                                    mod_audio.state.source_muted.store(!cur, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                MouseButton::ScrollUp => {
+                                    let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
+                                    mod_audio.state.volume.store((cur + step).min(150), std::sync::atomic::Ordering::Relaxed);
+                                }
+                                MouseButton::ScrollDown => {
+                                    let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
+                                    mod_audio.state.volume.store(cur.saturating_sub(step), std::sync::atomic::Ordering::Relaxed);
+                                }
+                                _ => {
+                                    let cur = mod_audio.state.sink_muted.load(std::sync::atomic::Ordering::Relaxed);
+                                    mod_audio.state.sink_muted.store(!cur, std::sync::atomic::Ordering::Relaxed);
+                                }
+                            }
+                            let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+                            for id in reg_ids {
+                                self.render_bar(qh, id);
+                            }
                             tokio::spawn(async move {
-                                if button == MouseButton::Right {
-                                    mod_audio.toggle_mic_mute().await;
-                                } else {
-                                    mod_audio.toggle_mute().await;
+                                match button {
+                                    MouseButton::Right => mod_audio.toggle_mic_mute().await,
+                                    MouseButton::ScrollUp => mod_audio.volume_up(step).await,
+                                    MouseButton::ScrollDown => mod_audio.volume_down(step).await,
+                                    _ => mod_audio.toggle_mute().await,
                                 }
                             });
                             return;
                         }
                         ClickAction::ToggleMicMute => {
                             let mod_audio = self.mod_audio.clone();
+                            let cur = mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
+                            mod_audio.state.source_muted.store(!cur, std::sync::atomic::Ordering::Relaxed);
+                            let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+                            for id in reg_ids {
+                                self.render_bar(qh, id);
+                            }
                             tokio::spawn(async move {
                                 mod_audio.toggle_mic_mute().await;
                             });
@@ -595,25 +625,43 @@ impl BarState {
                         }
                         ClickAction::AudioVolumeUp => {
                             let mod_audio = self.mod_audio.clone();
+                            let step = self.config.modules.audio.step_percent;
+                            let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
+                            mod_audio.state.volume.store((cur + step).min(150), std::sync::atomic::Ordering::Relaxed);
+                            let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+                            for id in reg_ids {
+                                self.render_bar(qh, id);
+                            }
                             tokio::spawn(async move {
-                                mod_audio.volume_up(5).await;
+                                mod_audio.volume_up(step).await;
                             });
                             return;
                         }
                         ClickAction::AudioVolumeDown => {
                             let mod_audio = self.mod_audio.clone();
+                            let step = self.config.modules.audio.step_percent;
+                            let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
+                            mod_audio.state.volume.store(cur.saturating_sub(step), std::sync::atomic::Ordering::Relaxed);
+                            let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+                            for id in reg_ids {
+                                self.render_bar(qh, id);
+                            }
                             tokio::spawn(async move {
-                                mod_audio.volume_down(5).await;
+                                mod_audio.volume_down(step).await;
                             });
                             return;
                         }
                         ClickAction::NetworkClick => {
                             let cmd = self.config.modules.network.click_command.clone();
                             tokio::spawn(async move {
-                                let _ = tokio::process::Command::new("sh")
-                                    .arg("-c")
-                                    .arg(&cmd)
-                                    .spawn();
+                                if cmd == "nmtui" || cmd == "hyprstatus --wifi-menu" || cmd == "wifi-menu" || cmd.is_empty() {
+                                    NetworkModule::open_wifi_modal().await;
+                                } else {
+                                    let _ = tokio::process::Command::new("sh")
+                                        .arg("-c")
+                                        .arg(&cmd)
+                                        .spawn();
+                                }
                             });
                             return;
                         }
@@ -1109,7 +1157,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for BarState {
                         274 => MouseButton::Middle,
                         _ => MouseButton::Left,
                     };
-                    state.handle_pointer_click(mouse_btn, state.pointer_x as i32, state.pointer_y as i32);
+                    state.handle_pointer_click(qh, mouse_btn, state.pointer_x as i32, state.pointer_y as i32);
                 }
             }
             wl_pointer::Event::Axis { value, .. } => {
@@ -1118,7 +1166,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for BarState {
                 } else {
                     MouseButton::ScrollDown
                 };
-                state.handle_pointer_click(mouse_btn, state.pointer_x as i32, state.pointer_y as i32);
+                state.handle_pointer_click(qh, mouse_btn, state.pointer_x as i32, state.pointer_y as i32);
             }
             _ => {}
         }
