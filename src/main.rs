@@ -15,9 +15,19 @@ use modules::perf::PerfModule;
 use modules::tray::TrayModule;
 use modules::window_title::WindowTitleModule;
 use modules::workspace::WorkspaceModule;
+use std::os::unix::io::{AsFd, AsRawFd, RawFd};
 use std::sync::Arc;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::watch;
 use wayland_client::Connection;
+
+struct WaylandFd(Connection);
+
+impl AsRawFd for WaylandFd {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0.as_fd().as_raw_fd()
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,25 +87,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let display = conn.display();
     let _registry = display.get_registry(&qh, ());
 
-    // Initial roundtrip to populate globals and monitor registry
+    // Initial roundtrips to bind globals and register monitors
+    event_queue.roundtrip(&mut state)?;
     event_queue.roundtrip(&mut state)?;
     event_queue.roundtrip(&mut state)?;
 
     println!("[wayland] Initialized {} active monitor bar(s)", state.bars.len());
 
-    // Main event loop with periodic refresh timer
+    let async_fd = unsafe {
+        AsyncFd::register_with_interest(WaylandFd(conn.clone()), tokio::io::Interest::READABLE)?
+    };
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(1000));
 
     loop {
+        // 1. Dispatch any pending Wayland messages already in queue
+        event_queue.dispatch_pending(&mut state)?;
+        conn.flush()?;
+
+        // 2. Prepare read guard
+        let read_guard = event_queue.prepare_read();
+
         tokio::select! {
+            res = async_fd.readable() => {
+                let mut ready_guard = res?;
+                ready_guard.clear_ready();
+                if let Some(guard) = read_guard {
+                    if let Err(e) = guard.read() {
+                        eprintln!("[wayland] Socket read error: {}", e);
+                    }
+                }
+                event_queue.dispatch_pending(&mut state)?;
+            }
             _ = interval.tick() => {
-                // Periodic bar re-render (time, sparklines, battery, throughput)
+                std::mem::drop(read_guard);
                 let reg_ids: Vec<u32> = state.bars.keys().copied().collect();
                 for id in reg_ids {
                     state.render_bar(&qh, id);
                 }
             }
             Ok(()) = config_rx.changed() => {
+                std::mem::drop(read_guard);
                 let new_cfg = config_rx.borrow().clone();
                 println!("[main] Applying hot-reloaded configuration to status bars");
                 state.config = new_cfg.clone();
@@ -106,6 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             Ok(event) = hypr_rx.recv() => {
+                std::mem::drop(read_guard);
                 match event {
                     HyprEvent::WorkspaceChanged { .. }
                     | HyprEvent::ActiveWindowChanged { .. }
@@ -120,9 +152,5 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-
-        // Dispatch pending Wayland messages
-        event_queue.dispatch_pending(&mut state)?;
-        event_queue.flush()?;
     }
 }

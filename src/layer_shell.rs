@@ -941,6 +941,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for BarState {
                 width,
                 height,
             } => {
+                println!("[layer_shell] Configure event received for id={}, width={}, height={}", id, width, height);
                 surface.ack_configure(serial);
 
                 if id >= 1000 {
