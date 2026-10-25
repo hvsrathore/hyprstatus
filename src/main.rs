@@ -1,0 +1,128 @@
+mod config;
+mod ipc;
+mod layer_shell;
+mod modules;
+mod renderer;
+
+use config::{load_or_create_config, watch_config_file};
+use ipc::{HyprEvent, HyprlandIpc};
+use layer_shell::BarState;
+use modules::audio::AudioModule;
+use modules::battery::BatteryModule;
+use modules::clock::ClockModule;
+use modules::network::NetworkModule;
+use modules::perf::PerfModule;
+use modules::tray::TrayModule;
+use modules::window_title::WindowTitleModule;
+use modules::workspace::WorkspaceModule;
+use std::sync::Arc;
+use tokio::sync::watch;
+use wayland_client::Connection;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("------------------------------------------------------------");
+    println!("hyprstatus - Blazing-fast i3-style Status Bar for Hyprland");
+    println!("------------------------------------------------------------");
+
+    // 1. Load initial configuration
+    let initial_config = Arc::new(load_or_create_config());
+    let (config_tx, mut config_rx) = watch::channel(initial_config.clone());
+
+    // 2. Start config hot-reload watcher
+    watch_config_file(config_tx);
+
+    // 3. Connect to Hyprland IPC
+    let (hypr_ipc, mut hypr_rx) = HyprlandIpc::new();
+    hypr_ipc.start_listener();
+
+    // 4. Initialize Modular Status Widgets
+    let mod_workspace = WorkspaceModule::new(hypr_ipc.state.clone());
+    let mod_window_title = WindowTitleModule::new(hypr_ipc.state.clone());
+    let mod_audio = AudioModule::new();
+    let mod_network = NetworkModule::new();
+    let mod_battery = BatteryModule::new();
+    let mod_perf = PerfModule::new();
+    let mod_clock = ClockModule::new();
+    let mod_tray = TrayModule::new();
+
+    // 5. Connect to Wayland compositor
+    let conn = match Connection::connect_to_env() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[wayland] Failed to connect to Wayland display: {}", e);
+            eprintln!("[wayland] Ensure WAYLAND_DISPLAY is set and Hyprland is running.");
+            return Err(e.into());
+        }
+    };
+
+    println!("[wayland] Connected to Wayland compositor");
+
+    let mut event_queue = conn.new_event_queue();
+    let qh = event_queue.handle();
+
+    let mut state = BarState::new(
+        initial_config,
+        mod_workspace,
+        mod_window_title,
+        mod_audio,
+        mod_network,
+        mod_battery,
+        mod_perf,
+        mod_clock,
+        mod_tray,
+    );
+
+    // Get display registry and discover globals
+    let display = conn.display();
+    let _registry = display.get_registry(&qh, ());
+
+    // Initial roundtrip to populate globals and monitor registry
+    event_queue.roundtrip(&mut state)?;
+    event_queue.roundtrip(&mut state)?;
+
+    println!("[wayland] Initialized {} active monitor bar(s)", state.bars.len());
+
+    // Main event loop with periodic refresh timer
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(1000));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                // Periodic bar re-render (time, sparklines, battery, throughput)
+                let reg_ids: Vec<u32> = state.bars.keys().copied().collect();
+                for id in reg_ids {
+                    state.render_bar(&qh, id);
+                }
+            }
+            Ok(()) = config_rx.changed() => {
+                let new_cfg = config_rx.borrow().clone();
+                println!("[main] Applying hot-reloaded configuration to status bars");
+                state.config = new_cfg.clone();
+                state.renderer = renderer::SoftwareRenderer::new(&new_cfg.bar.font_path);
+                let reg_ids: Vec<u32> = state.bars.keys().copied().collect();
+                for id in reg_ids {
+                    state.render_bar(&qh, id);
+                }
+            }
+            Ok(event) = hypr_rx.recv() => {
+                match event {
+                    HyprEvent::WorkspaceChanged { .. }
+                    | HyprEvent::ActiveWindowChanged { .. }
+                    | HyprEvent::FocusedMonitorChanged { .. }
+                    | HyprEvent::LayoutConfigChanged => {
+                        let reg_ids: Vec<u32> = state.bars.keys().copied().collect();
+                        for id in reg_ids {
+                            state.render_bar(&qh, id);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Dispatch pending Wayland messages
+        event_queue.dispatch_pending(&mut state)?;
+        event_queue.flush()?;
+    }
+}
