@@ -151,6 +151,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(event) = hypr_rx.recv() => {
                 std::mem::drop(read_guard);
+                if state.has_visible_popover() {
+                    state.hide_all_popovers();
+                }
                 match event {
                     HyprEvent::WorkspaceChanged { .. }
                     | HyprEvent::ActiveWindowChanged { .. }

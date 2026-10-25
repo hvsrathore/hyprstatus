@@ -88,6 +88,11 @@ pub struct BarOutput {
     pub popup_layer_surface: Option<ZwlrLayerSurfaceV1>,
     pub popup_buffer: Option<ShmBuffer>,
     pub popup_configured: bool,
+
+    // Backdrop for click-outside dismissal
+    pub backdrop_surface: Option<wl_surface::WlSurface>,
+    pub backdrop_layer_surface: Option<ZwlrLayerSurfaceV1>,
+    pub backdrop_buffer: Option<ShmBuffer>,
 }
 
 pub struct BarState {
@@ -237,6 +242,9 @@ impl BarState {
                 popup_layer_surface: None,
                 popup_buffer: None,
                 popup_configured: false,
+                backdrop_surface: None,
+                backdrop_layer_surface: None,
+                backdrop_buffer: None,
             },
         );
     }
@@ -557,6 +565,19 @@ impl BarState {
     }
 
     pub fn handle_pointer_click(&mut self, qh: &QueueHandle<Self>, button: MouseButton, x: i32, y: i32) {
+        // 0. If click is on any backdrop surface, dismiss all popovers immediately
+        let mut clicked_backdrop = false;
+        for bar in self.bars.values() {
+            if bar.backdrop_surface.as_ref() == self.pointer_surface.as_ref() {
+                clicked_backdrop = true;
+                break;
+            }
+        }
+        if clicked_backdrop {
+            self.hide_all_popovers();
+            return;
+        }
+
         let mut hide_reg_id = None;
         let mut rerender_popover = None;
         let mut rerender_bar = None;
@@ -709,8 +730,10 @@ impl BarState {
 
         // 2. Click is on the status bar itself
         let mut clicked: Option<(u32, ClickAction, i32, u32)> = None;
+        let mut on_bar = false;
         for (&reg_id, bar) in &self.bars {
             if Some(&bar.surface) == self.pointer_surface.as_ref() {
+                on_bar = true;
                 for cr in &bar.click_regions {
                     if x >= cr.x && x < cr.x + cr.width as i32 && y >= cr.y && y < cr.y + cr.height as i32 {
                         clicked = Some((reg_id, cr.action.clone(), cr.x, cr.width));
@@ -721,10 +744,19 @@ impl BarState {
             }
         }
 
+        // Clicking elsewhere (empty bar space or off-surface): dismiss popovers
+        if !on_bar || clicked.is_none() {
+            if self.has_visible_popover() {
+                self.hide_all_popovers();
+            }
+            return;
+        }
+
         if let Some((active_reg_id, action, cr_x, cr_width)) = clicked {
             match action {
                 ClickAction::SwitchWorkspace(id) => {
                     let ws_id = id;
+                    self.hide_all_popovers();
                     match button {
                         MouseButton::ScrollUp => {
                             tokio::spawn(async move {
@@ -737,7 +769,6 @@ impl BarState {
                             });
                         }
                         _ => {
-                            self.hide_popover(active_reg_id);
                             tokio::spawn(async move {
                                 let _ = HyprlandIpc::switch_workspace(ws_id).await;
                             });
@@ -788,6 +819,7 @@ impl BarState {
                     }
                 }
                 ClickAction::ToggleMicMute => {
+                    self.hide_all_popovers();
                     let mod_audio = self.mod_audio.clone();
                     let cur = mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
                     mod_audio.state.source_muted.store(!cur, std::sync::atomic::Ordering::Relaxed);
@@ -829,6 +861,7 @@ impl BarState {
                     let anchor_x = cr_x + (cr_width as i32 / 2);
                     match button {
                         MouseButton::Right => {
+                            self.hide_all_popovers();
                             let cmd = self.config.modules.network.click_command.clone();
                             tokio::spawn(async move {
                                 let _ = tokio::process::Command::new("alacritty")
@@ -843,7 +876,7 @@ impl BarState {
                     }
                 }
                 ClickAction::PerfClick => {
-                    self.hide_popover(active_reg_id);
+                    self.hide_all_popovers();
                     let cmd = self.config.modules.perf.click_command.clone();
                     tokio::spawn(async move {
                         let _ = tokio::process::Command::new("alacritty")
@@ -853,7 +886,7 @@ impl BarState {
                     });
                 }
                 ClickAction::ClockClick => {
-                    self.hide_popover(active_reg_id);
+                    self.hide_all_popovers();
                     tokio::spawn(async move {
                         let _ = tokio::process::Command::new("notify-send")
                             .args(["-a", "hyprstatus", "Calendar", "Calendar notification"])
@@ -861,7 +894,7 @@ impl BarState {
                     });
                 }
                 ClickAction::TrayActivate(service) => {
-                    self.hide_popover(active_reg_id);
+                    self.hide_all_popovers();
                     let mod_tray = self.mod_tray.clone();
                     tokio::spawn(async move {
                         if button == MouseButton::Right {
@@ -872,7 +905,7 @@ impl BarState {
                     });
                 }
                 ClickAction::TrayContextMenu(service) => {
-                    self.hide_popover(active_reg_id);
+                    self.hide_all_popovers();
                     let mod_tray = self.mod_tray.clone();
                     tokio::spawn(async move {
                         mod_tray.context_menu_item(&service, x, y).await;
@@ -950,6 +983,55 @@ impl BarState {
     }
 
     pub fn show_popover_surface(&mut self, qh: &QueueHandle<Self>, reg_id: u32, anchor_x: i32) {
+        let is_interactive = if let Some(bar) = self.bars.get(&reg_id) {
+            matches!(bar.popover.kind, PopoverKind::Audio(_) | PopoverKind::Wifi(_))
+        } else {
+            false
+        };
+
+        if is_interactive {
+            let bar_height = self.bars.get(&reg_id).map_or(30, |b| b.height as i32);
+            let bar_pos_bottom = self.config.bar.position == "bottom";
+            if let (Some(compositor), Some(layer_shell)) = (&self.compositor, &self.layer_shell) {
+                let needed: Vec<(u32, wl_output::WlOutput)> = self
+                    .bars
+                    .iter()
+                    .filter(|(_, b)| b.backdrop_surface.is_none())
+                    .map(|(&id, b)| (id, b.output.clone()))
+                    .collect();
+
+                for (id, output) in needed {
+                    let b_surf = compositor.create_surface(qh, ());
+                    let b_layer = layer_shell.get_layer_surface(
+                        &b_surf,
+                        Some(&output),
+                        zwlr_layer_shell_v1::Layer::Top,
+                        "hyprstatus-backdrop".to_string(),
+                        qh,
+                        id + 2000,
+                    );
+                    b_layer.set_anchor(
+                        zwlr_layer_surface_v1::Anchor::Top
+                        | zwlr_layer_surface_v1::Anchor::Bottom
+                        | zwlr_layer_surface_v1::Anchor::Left
+                        | zwlr_layer_surface_v1::Anchor::Right,
+                    );
+                    if bar_pos_bottom {
+                        b_layer.set_margin(0, 0, bar_height, 0);
+                    } else {
+                        b_layer.set_margin(bar_height, 0, 0, 0);
+                    }
+                    b_layer.set_exclusive_zone(-1);
+                    b_surf.commit();
+
+                    if let Some(b) = self.bars.get_mut(&id) {
+                        b.backdrop_surface = Some(b_surf);
+                        b.backdrop_layer_surface = Some(b_layer);
+                    }
+                }
+            }
+        }
+
         let bar = match self.bars.get_mut(&reg_id) {
             Some(b) => b,
             None => return,
@@ -1051,11 +1133,14 @@ impl BarState {
     }
 
     pub fn toggle_audio_popover(&mut self, qh: &QueueHandle<Self>, reg_id: u32, anchor_x: i32) {
-        if let Some(bar) = self.bars.get(&reg_id) {
-            if bar.popover.visible && matches!(bar.popover.kind, PopoverKind::Audio(_)) {
-                self.hide_popover(reg_id);
-                return;
-            }
+        let already_open = if let Some(bar) = self.bars.get(&reg_id) {
+            bar.popover.visible && matches!(bar.popover.kind, PopoverKind::Audio(_))
+        } else {
+            false
+        };
+        self.hide_all_popovers();
+        if already_open {
+            return;
         }
 
         let vol = self.mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
@@ -1076,17 +1161,21 @@ impl BarState {
             bar.popover.width = 320;
             bar.popover.height = 240;
             bar.popover.anim_frame = 0;
+            bar.popover.visible = true;
         }
 
         self.show_popover_surface(qh, reg_id, anchor_x);
     }
 
     pub fn toggle_wifi_popover(&mut self, qh: &QueueHandle<Self>, reg_id: u32, anchor_x: i32) {
-        if let Some(bar) = self.bars.get(&reg_id) {
-            if bar.popover.visible && matches!(bar.popover.kind, PopoverKind::Wifi(_)) {
-                self.hide_popover(reg_id);
-                return;
-            }
+        let already_open = if let Some(bar) = self.bars.get(&reg_id) {
+            bar.popover.visible && matches!(bar.popover.kind, PopoverKind::Wifi(_))
+        } else {
+            false
+        };
+        self.hide_all_popovers();
+        if already_open {
+            return;
         }
 
         let enabled = self.mod_network.get_wifi_enabled();
@@ -1110,6 +1199,7 @@ impl BarState {
             bar.popover.width = 340;
             bar.popover.height = 350;
             bar.popover.anim_frame = 0;
+            bar.popover.visible = true;
         }
 
         self.show_popover_surface(qh, reg_id, anchor_x);
@@ -1117,7 +1207,7 @@ impl BarState {
 
     pub fn hide_popover(&mut self, reg_id: u32) {
         if let Some(bar) = self.bars.get_mut(&reg_id) {
-            if bar.popover.visible || bar.popup_surface.is_some() {
+            if bar.popover.visible || bar.popup_surface.is_some() || bar.backdrop_surface.is_some() {
                 bar.popover.visible = false;
                 bar.popover.kind = PopoverKind::None;
                 bar.popup_configured = false;
@@ -1128,9 +1218,24 @@ impl BarState {
                     s.destroy();
                 }
                 bar.popup_buffer = None;
+
+                if let Some(bls) = bar.backdrop_layer_surface.take() {
+                    bls.destroy();
+                }
+                if let Some(bs) = bar.backdrop_surface.take() {
+                    bs.destroy();
+                }
+                bar.backdrop_buffer = None;
             }
         }
         self.hovered_ws_pill = None;
+    }
+
+    pub fn hide_all_popovers(&mut self) {
+        let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+        for id in reg_ids {
+            self.hide_popover(id);
+        }
     }
 
     pub fn hide_workspace_popup(&mut self) {
@@ -1309,6 +1414,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BarState {
                     if let Some(ps) = bar.popup_surface.take() {
                         ps.destroy();
                     }
+                    if let Some(bls) = bar.backdrop_layer_surface.take() {
+                        bls.destroy();
+                    }
+                    if let Some(bs) = bar.backdrop_surface.take() {
+                        bs.destroy();
+                    }
                     bar.layer_surface.destroy();
                     bar.surface.destroy();
                 }
@@ -1405,7 +1516,29 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for BarState {
                 println!("[layer_shell] Configure event received for id={}, width={}, height={}", id, width, height);
                 surface.ack_configure(serial);
 
-                if id >= 1000 {
+                if id >= 2000 {
+                    // Backdrop configure
+                    let bar_id = id - 2000;
+                    if let Some(bar) = state.bars.get_mut(&bar_id) {
+                        if let Some(shm) = &state.shm {
+                            let bw = width.max(1);
+                            let bh = height.max(1);
+                            if bar.backdrop_buffer.as_ref().map_or(true, |b| b.width != bw || b.height != bh) {
+                                match ShmBuffer::new(shm, qh, bw, bh) {
+                                    Ok(b) => bar.backdrop_buffer = Some(b),
+                                    Err(e) => {
+                                        eprintln!("[layer_shell] Failed to allocate shm buffer for backdrop: {}", e);
+                                    }
+                                }
+                            }
+                            if let (Some(s), Some(buf)) = (&bar.backdrop_surface, &bar.backdrop_buffer) {
+                                s.attach(Some(&buf.buffer), 0, 0);
+                                s.damage_buffer(0, 0, bw as i32, bh as i32);
+                                s.commit();
+                            }
+                        }
+                    }
+                } else if id >= 1000 {
                     // Popup configure
                     let bar_id = id - 1000;
                     if let Some(bar) = state.bars.get_mut(&bar_id) {
@@ -1424,9 +1557,18 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for BarState {
                 }
             }
             zwlr_layer_surface_v1::Event::Closed => {
-                if id < 1000 {
-                    state.bars.remove(&id);
-                } else {
+                if id >= 2000 {
+                    let bar_id = id - 2000;
+                    if let Some(bar) = state.bars.get_mut(&bar_id) {
+                        if let Some(bls) = bar.backdrop_layer_surface.take() {
+                            bls.destroy();
+                        }
+                        if let Some(bs) = bar.backdrop_surface.take() {
+                            bs.destroy();
+                        }
+                        bar.backdrop_buffer = None;
+                    }
+                } else if id >= 1000 {
                     let bar_id = id - 1000;
                     if let Some(bar) = state.bars.get_mut(&bar_id) {
                         if let Some(ls) = bar.popup_layer_surface.take() {
@@ -1439,6 +1581,8 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for BarState {
                         bar.popup_configured = false;
                         bar.popover.visible = false;
                     }
+                } else {
+                    state.bars.remove(&id);
                 }
             }
             _ => {}
