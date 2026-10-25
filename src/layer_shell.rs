@@ -1257,6 +1257,13 @@ impl BarState {
             bar.popover.visible = true;
         }
 
+        if enabled {
+            let mod_net = self.mod_network.clone();
+            tokio::spawn(async move {
+                mod_net.refresh_networks().await;
+            });
+        }
+
         self.show_popover_surface(qh, reg_id, anchor_x);
     }
 
@@ -1387,9 +1394,22 @@ impl BarState {
                     wifi.active_ssid = net_state.ssid.clone();
                     wifi.active_signal = net_state.signal_percent;
 
-                    let cached = self.mod_network.get_cached_networks();
-                    if !cached.is_empty() {
-                        wifi.networks = cached;
+                    let mut cached = self.mod_network.get_cached_networks();
+                    for net in &mut cached {
+                        if !wifi.active_ssid.is_empty() && net.ssid == wifi.active_ssid {
+                            net.in_use = true;
+                        } else {
+                            net.in_use = false;
+                        }
+                    }
+                    wifi.networks = cached;
+
+                    // Periodic active refresh every ~2.5s (35 frames) while popover is open
+                    if bar.popover.anim_frame % 35 == 0 && enabled && !wifi.is_scanning {
+                        let mod_net = self.mod_network.clone();
+                        tokio::spawn(async move {
+                            mod_net.refresh_networks().await;
+                        });
                     }
 
                     // Reset scanning state after a brief delay (~20 frames = ~1.4s)

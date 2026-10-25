@@ -95,7 +95,7 @@ impl NetworkModule {
     pub fn query_wifi_networks_sync() -> Vec<crate::modules::popup::WifiNetworkItem> {
         let mut list = Vec::new();
         if let Ok(output) = std::process::Command::new("nmcli")
-            .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list"])
+            .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list", "--rescan", "auto"])
             .output()
         {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -138,7 +138,7 @@ impl NetworkModule {
     pub async fn query_wifi_networks() -> Vec<crate::modules::popup::WifiNetworkItem> {
         let mut list = Vec::new();
         let output = tokio::process::Command::new("nmcli")
-            .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list"])
+            .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list", "--rescan", "auto"])
             .output()
             .await;
         if let Ok(o) = output {
@@ -308,12 +308,19 @@ impl NetworkModule {
                     }
 
                     if iface.starts_with("wl") || Path::new(&format!("/sys/class/net/{}/wireless", iface)).exists() {
-                        current_state.net_type = NetType::Wifi;
                         // Query Wi-Fi info via iw or /proc/net/wireless
                         let (ssid, dbm, pct) = Self::query_wifi_details(&iface);
-                        current_state.ssid = ssid;
-                        current_state.signal_dbm = dbm;
-                        current_state.signal_percent = pct;
+                        if ssid.is_empty() {
+                            current_state.net_type = NetType::Disconnected;
+                            current_state.ssid = String::new();
+                            current_state.signal_dbm = -100;
+                            current_state.signal_percent = 0;
+                        } else {
+                            current_state.net_type = NetType::Wifi;
+                            current_state.ssid = ssid;
+                            current_state.signal_dbm = dbm;
+                            current_state.signal_percent = pct;
+                        }
                     } else if iface.starts_with("en") || iface.starts_with("eth") {
                         current_state.net_type = NetType::Ethernet;
                     } else {
@@ -336,10 +343,11 @@ impl NetworkModule {
                 wifi_enabled.store(is_enabled, std::sync::atomic::Ordering::Relaxed);
                 if is_enabled {
                     let fresh = Self::query_wifi_networks_sync();
-                    if !fresh.is_empty() {
-                        let mut cn = cached_networks.write().await;
-                        *cn = fresh;
-                    }
+                    let mut cn = cached_networks.write().await;
+                    *cn = fresh;
+                } else {
+                    let mut cn = cached_networks.write().await;
+                    cn.clear();
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
@@ -443,8 +451,12 @@ impl NetworkModule {
         }
 
         // Convert dBm to percentage roughly (-100 to -50)
-        let pct = (((signal_dbm + 100) * 2).clamp(0, 100)) as u32;
-        (if ssid.is_empty() { "Wi-Fi".to_string() } else { ssid }, signal_dbm, pct)
+        let pct = if ssid.is_empty() {
+            0
+        } else {
+            (((signal_dbm + 100) * 2).clamp(0, 100)) as u32
+        };
+        (ssid, signal_dbm, pct)
     }
 
     fn format_speed(bytes_per_sec: u64) -> String {
