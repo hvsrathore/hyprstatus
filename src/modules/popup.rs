@@ -597,6 +597,21 @@ pub struct WifiNetworkItem {
     pub is_saved: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiPasswordPrompt {
+    pub ssid: String,
+    pub password: String,
+    pub show_password: bool,
+    pub error_message: Option<String>,
+    pub is_connecting: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiPasswordRequest {
+    pub ssid: String,
+    pub error_message: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WifiPopover {
     pub width: u32,
@@ -608,6 +623,7 @@ pub struct WifiPopover {
     pub status_message: Option<String>,
     pub status_timer: u32,
     pub is_scanning: bool,
+    pub password_prompt: Option<WifiPasswordPrompt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -620,6 +636,10 @@ pub enum WifiPopoverAction {
     Forget(String),
     OpenNmtui,
     Close,
+    CancelPasswordPrompt,
+    ToggleShowPassword,
+    SubmitPassword { ssid: String, password: String },
+    PasswordChanged,
 }
 
 impl WifiPopover {
@@ -641,10 +661,93 @@ impl WifiPopover {
             status_message: None,
             status_timer: 0,
             is_scanning: false,
+            password_prompt: None,
         }
     }
 
+    pub fn handle_key_input(
+        &mut self,
+        text: &str,
+        is_backspace: bool,
+        is_enter: bool,
+        is_escape: bool,
+        is_clear: bool,
+    ) -> WifiPopoverAction {
+        if let Some(prompt) = &mut self.password_prompt {
+            if is_escape {
+                self.password_prompt = None;
+                return WifiPopoverAction::CancelPasswordPrompt;
+            }
+            if is_enter {
+                if !prompt.is_connecting && !prompt.password.is_empty() {
+                    prompt.is_connecting = true;
+                    prompt.error_message = None;
+                    return WifiPopoverAction::SubmitPassword {
+                        ssid: prompt.ssid.clone(),
+                        password: prompt.password.clone(),
+                    };
+                }
+                return WifiPopoverAction::None;
+            }
+            if is_clear {
+                prompt.password.clear();
+                prompt.error_message = None;
+                return WifiPopoverAction::PasswordChanged;
+            }
+            if is_backspace {
+                prompt.password.pop();
+                prompt.error_message = None;
+                return WifiPopoverAction::PasswordChanged;
+            }
+            if !text.is_empty() {
+                for ch in text.chars() {
+                    if !ch.is_control() {
+                        prompt.password.push(ch);
+                    }
+                }
+                prompt.error_message = None;
+                return WifiPopoverAction::PasswordChanged;
+            }
+        }
+        WifiPopoverAction::None
+    }
+
     pub fn handle_click(&self, click_x: i32, click_y: i32) -> WifiPopoverAction {
+        // If password prompt is active, handle clicks inside password prompt view
+        if let Some(prompt) = &self.password_prompt {
+            // Close button [✕] at top-right
+            if click_x >= 300 && click_x <= 332 && click_y >= 4 && click_y <= 32 {
+                return WifiPopoverAction::Close;
+            }
+
+            // Back button [← Back]: x: 16..90, y: 6..32
+            if click_x >= 16 && click_x <= 90 && click_y >= 6 && click_y <= 32 {
+                return WifiPopoverAction::CancelPasswordPrompt;
+            }
+
+            // Show/Hide password toggle (eye icon): x: 276..320, y: 126..168
+            if click_x >= 276 && click_x <= 320 && click_y >= 126 && click_y <= 168 {
+                return WifiPopoverAction::ToggleShowPassword;
+            }
+
+            // Cancel button: x: 16..162, y: 202..242
+            if click_x >= 16 && click_x <= 162 && click_y >= 202 && click_y <= 242 {
+                return WifiPopoverAction::CancelPasswordPrompt;
+            }
+
+            // Connect button: x: 178..324, y: 202..242
+            if click_x >= 178 && click_x <= 324 && click_y >= 202 && click_y <= 242 {
+                if !prompt.is_connecting && !prompt.password.is_empty() {
+                    return WifiPopoverAction::SubmitPassword {
+                        ssid: prompt.ssid.clone(),
+                        password: prompt.password.clone(),
+                    };
+                }
+            }
+
+            return WifiPopoverAction::None;
+        }
+
         // Close button [✕] at top-right
         if click_x >= 300 && click_x <= 332 && click_y >= 4 && click_y <= 32 {
             return WifiPopoverAction::Close;
@@ -694,6 +797,11 @@ impl WifiPopover {
         config: &Config,
         anim_frame: u32,
     ) {
+        if let Some(prompt) = &self.password_prompt {
+            self.render_password_prompt(renderer, buffer, config, anim_frame, prompt);
+            return;
+        }
+
         let bg_color = parse_hex_color("#181825");
         let border_color = parse_hex_color(&config.colors.network);
         let text_color = parse_hex_color(&config.colors.foreground);
@@ -1039,6 +1147,373 @@ impl WifiPopover {
             text_color,
         );
     }
+
+    fn render_password_prompt(
+        &self,
+        renderer: &mut SoftwareRenderer,
+        buffer: &mut [u8],
+        config: &Config,
+        anim_frame: u32,
+        prompt: &WifiPasswordPrompt,
+    ) {
+        let bg_color = parse_hex_color("#181825");
+        let border_color = parse_hex_color(&config.colors.network);
+        let text_color = parse_hex_color(&config.colors.foreground);
+        let block_bg = parse_hex_color(&config.colors.block_background);
+        let border_subtle = parse_hex_color(&config.colors.border);
+        let accent_color = parse_hex_color(&config.colors.network);
+        let green_color = parse_hex_color(&config.colors.battery_good);
+        let red_color = parse_hex_color(&config.colors.battery_critical);
+        let muted_text = parse_hex_color("#a6adc8");
+
+        // Outer window with rounded corners
+        SoftwareRenderer::draw_rounded_rect(
+            buffer,
+            self.width,
+            self.height,
+            0,
+            0,
+            self.width,
+            self.height,
+            8,
+            bg_color,
+            Some(border_color),
+            2,
+        );
+
+        // Header: Back button [← Back], Title "Wi-Fi Authentication", Close button [✕]
+        SoftwareRenderer::draw_rounded_rect(
+            buffer,
+            self.width,
+            self.height,
+            16,
+            8,
+            68,
+            22,
+            4,
+            block_bg,
+            Some(border_subtle),
+            1,
+        );
+        renderer.draw_text(buffer, self.width, self.height, "󰁍 Back", 24, 22, 8.5, text_color);
+
+        renderer.draw_text(
+            buffer,
+            self.width,
+            self.height,
+            "Wi-Fi Authentication",
+            94,
+            24,
+            11.0,
+            accent_color,
+        );
+
+        // Close button [✕]
+        SoftwareRenderer::draw_rounded_rect(
+            buffer,
+            self.width,
+            self.height,
+            304,
+            8,
+            20,
+            22,
+            4,
+            block_bg,
+            Some(border_subtle),
+            1,
+        );
+        renderer.draw_text(buffer, self.width, self.height, "✕", 310, 22, 10.0, text_color);
+
+        // Network Info Badge / Card
+        SoftwareRenderer::draw_rounded_rect(
+            buffer,
+            self.width,
+            self.height,
+            16,
+            38,
+            308,
+            46,
+            6,
+            parse_hex_color("#1e1e2e"),
+            Some(border_subtle),
+            1,
+        );
+
+        let net_item = self.networks.iter().find(|n| n.ssid == prompt.ssid);
+        let signal = net_item.map_or(self.active_signal, |n| n.signal);
+        let security = net_item.map_or("WPA2/WPA3", |n| {
+            if n.security.is_empty() || n.security == "--" {
+                "Encrypted"
+            } else {
+                &n.security
+            }
+        });
+
+        let (icon, icon_color) = if signal >= 75 {
+            ("󰤨", green_color)
+        } else if signal >= 50 {
+            ("󰤥", accent_color)
+        } else if signal >= 25 {
+            ("󰤢", parse_hex_color(&config.colors.battery_warning))
+        } else {
+            ("󰤟", red_color)
+        };
+        renderer.draw_text(buffer, self.width, self.height, icon, 26, 68, 13.0, icon_color);
+
+        let short_ssid: String = prompt.ssid.chars().take(20).collect();
+        renderer.draw_text(buffer, self.width, self.height, &short_ssid, 50, 56, 11.0, text_color);
+        renderer.draw_text(
+            buffer,
+            self.width,
+            self.height,
+            &format!("󰌾 {}", security),
+            50,
+            72,
+            8.5,
+            muted_text,
+        );
+
+        // Status / Error banner or instruction
+        if prompt.is_connecting {
+            SoftwareRenderer::draw_rounded_rect(
+                buffer,
+                self.width,
+                self.height,
+                16,
+                92,
+                308,
+                26,
+                4,
+                parse_hex_color("#1e2030"),
+                Some(accent_color),
+                1,
+            );
+            let waves = match (anim_frame / 3) % 4 {
+                0 => "󰤟",
+                1 => "󰤢",
+                2 => "󰤥",
+                _ => "󰤨",
+            };
+            renderer.draw_text(
+                buffer,
+                self.width,
+                self.height,
+                &format!("{} Connecting to \"{}\"...", waves, short_ssid),
+                24,
+                109,
+                8.5,
+                accent_color,
+            );
+        } else if let Some(ref err) = prompt.error_message {
+            SoftwareRenderer::draw_rounded_rect(
+                buffer,
+                self.width,
+                self.height,
+                16,
+                92,
+                308,
+                26,
+                4,
+                parse_hex_color("#1e1e2e"),
+                Some(red_color),
+                1,
+            );
+            let short_err: String = err.chars().take(34).collect();
+            renderer.draw_text(
+                buffer,
+                self.width,
+                self.height,
+                &format!("󰅖 {}", short_err),
+                24,
+                109,
+                8.5,
+                red_color,
+            );
+        } else {
+            renderer.draw_text(
+                buffer,
+                self.width,
+                self.height,
+                "Enter network password:",
+                18,
+                110,
+                9.0,
+                muted_text,
+            );
+        }
+
+        // Password Input Box
+        SoftwareRenderer::draw_rounded_rect(
+            buffer,
+            self.width,
+            self.height,
+            16,
+            126,
+            308,
+            42,
+            6,
+            parse_hex_color("#11111b"),
+            Some(accent_color),
+            2,
+        );
+
+        renderer.draw_text(buffer, self.width, self.height, "󰌾", 26, 152, 11.5, muted_text);
+
+        let masked_buf;
+        let (display_str, text_fg) = if prompt.password.is_empty() {
+            ("Enter password...", parse_hex_color("#585b70"))
+        } else if prompt.show_password {
+            let s: String = prompt.password.chars().rev().take(22).collect::<Vec<_>>().into_iter().rev().collect();
+            masked_buf = s;
+            (masked_buf.as_str(), text_color)
+        } else {
+            let bullets = "●".repeat(prompt.password.len().min(22));
+            masked_buf = bullets;
+            (masked_buf.as_str(), text_color)
+        };
+
+        let text_advance = renderer.draw_text(
+            buffer,
+            self.width,
+            self.height,
+            display_str,
+            46,
+            152,
+            10.5,
+            text_fg,
+        );
+
+        // Blinking cursor
+        if !prompt.is_connecting && (anim_frame / 6) % 2 == 0 {
+            let cursor_x = if prompt.password.is_empty() {
+                46
+            } else {
+                46 + text_advance as i32 + 2
+            };
+            SoftwareRenderer::draw_rect(buffer, self.width, self.height, cursor_x, 137, 2, 20, accent_color);
+        }
+
+        // Show/Hide password toggle eye button (x: 278..316, y: 132..162)
+        SoftwareRenderer::draw_rounded_rect(
+            buffer,
+            self.width,
+            self.height,
+            278,
+            132,
+            38,
+            30,
+            4,
+            block_bg,
+            Some(border_subtle),
+            1,
+        );
+        let (eye_icon, eye_fg) = if prompt.show_password {
+            ("󰈈", accent_color)
+        } else {
+            ("󰈉", muted_text)
+        };
+        renderer.draw_text(buffer, self.width, self.height, eye_icon, 290, 151, 11.0, eye_fg);
+
+        // Shortcut hint
+        renderer.draw_text(
+            buffer,
+            self.width,
+            self.height,
+            "Press Enter to connect, Esc to cancel",
+            18,
+            188,
+            8.5,
+            muted_text,
+        );
+
+        // Action Buttons Row [Cancel] [Connect] (y: 202..242)
+        // Cancel button
+        SoftwareRenderer::draw_rounded_rect(
+            buffer,
+            self.width,
+            self.height,
+            16,
+            202,
+            146,
+            40,
+            6,
+            block_bg,
+            Some(border_subtle),
+            1,
+        );
+        renderer.draw_text(buffer, self.width, self.height, "Cancel", 68, 226, 10.0, text_color);
+
+        // Connect button
+        if prompt.is_connecting {
+            SoftwareRenderer::draw_rounded_rect(
+                buffer,
+                self.width,
+                self.height,
+                178,
+                202,
+                146,
+                40,
+                6,
+                parse_hex_color("#313244"),
+                Some(accent_color),
+                1,
+            );
+            renderer.draw_text(buffer, self.width, self.height, "Connecting...", 212, 226, 9.5, accent_color);
+        } else if prompt.password.is_empty() {
+            SoftwareRenderer::draw_rounded_rect(
+                buffer,
+                self.width,
+                self.height,
+                178,
+                202,
+                146,
+                40,
+                6,
+                block_bg,
+                Some(border_subtle),
+                1,
+            );
+            renderer.draw_text(buffer, self.width, self.height, "Connect", 228, 226, 10.0, parse_hex_color("#585b70"));
+        } else {
+            SoftwareRenderer::draw_rounded_rect(
+                buffer,
+                self.width,
+                self.height,
+                178,
+                202,
+                146,
+                40,
+                6,
+                accent_color,
+                None,
+                0,
+            );
+            renderer.draw_text(buffer, self.width, self.height, "󰄬 Connect", 220, 226, 10.0, parse_hex_color("#11111b"));
+        }
+
+        // Info Footer
+        SoftwareRenderer::draw_rect(buffer, self.width, self.height, 16, 264, 308, 1, border_subtle);
+        renderer.draw_text(
+            buffer,
+            self.width,
+            self.height,
+            "󰌾 Security: WPA / WPA2 / WPA3 Personal",
+            20,
+            290,
+            8.5,
+            muted_text,
+        );
+        renderer.draw_text(
+            buffer,
+            self.width,
+            self.height,
+            "󰖩 Credentials will be saved by NetworkManager",
+            20,
+            312,
+            8.5,
+            muted_text,
+        );
+    }
 }
 
 // -------------------------------- Unified Bar Popover --------------------------------
@@ -1174,5 +1649,126 @@ mod tests {
         let mut audio_buf = vec![0u8; 320 * 240 * 4];
         audio_pop.render(&mut renderer, &mut audio_buf, &config, 0);
         audio_pop.render(&mut renderer, &mut audio_buf, &config, 30);
+    }
+
+    #[test]
+    fn test_wifi_popover_password_prompt_clicks() {
+        let net = WifiNetworkItem {
+            in_use: false,
+            ssid: "CoffeeShop".into(),
+            signal: 70,
+            security: "WPA2".into(),
+            is_saved: false,
+        };
+        let mut pop = WifiPopover::new(340, 350, true, "CoffeeShop".into(), 70, vec![net]);
+        pop.password_prompt = Some(WifiPasswordPrompt {
+            ssid: "CoffeeShop".into(),
+            password: "".into(),
+            show_password: false,
+            error_message: None,
+            is_connecting: false,
+        });
+
+        // Close button click [✕] at top-right
+        assert_eq!(pop.handle_click(310, 15), WifiPopoverAction::Close);
+
+        // Back button click [← Back]
+        assert_eq!(pop.handle_click(50, 15), WifiPopoverAction::CancelPasswordPrompt);
+
+        // Cancel button click
+        assert_eq!(pop.handle_click(80, 220), WifiPopoverAction::CancelPasswordPrompt);
+
+        // Eye icon toggle show password click
+        assert_eq!(pop.handle_click(295, 145), WifiPopoverAction::ToggleShowPassword);
+
+        // Connect button when password is empty: does not submit
+        assert_eq!(pop.handle_click(250, 220), WifiPopoverAction::None);
+
+        // Provide password
+        pop.password_prompt.as_mut().unwrap().password = "SecretPass123".into();
+
+        // Connect button with password -> SubmitPassword
+        assert_eq!(
+            pop.handle_click(250, 220),
+            WifiPopoverAction::SubmitPassword {
+                ssid: "CoffeeShop".into(),
+                password: "SecretPass123".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_wifi_popover_keyboard_input() {
+        let mut pop = WifiPopover::new(340, 350, true, "".into(), 0, vec![]);
+        pop.password_prompt = Some(WifiPasswordPrompt {
+            ssid: "OfficeWiFi".into(),
+            password: "".into(),
+            show_password: false,
+            error_message: Some("Invalid password".into()),
+            is_connecting: false,
+        });
+
+        // Type characters
+        assert_eq!(pop.handle_key_input("abc", false, false, false, false), WifiPopoverAction::PasswordChanged);
+        assert_eq!(pop.password_prompt.as_ref().unwrap().password, "abc");
+        assert_eq!(pop.password_prompt.as_ref().unwrap().error_message, None);
+
+        // Backspace
+        assert_eq!(pop.handle_key_input("", true, false, false, false), WifiPopoverAction::PasswordChanged);
+        assert_eq!(pop.password_prompt.as_ref().unwrap().password, "ab");
+
+        // Clear
+        assert_eq!(pop.handle_key_input("", false, false, false, true), WifiPopoverAction::PasswordChanged);
+        assert_eq!(pop.password_prompt.as_ref().unwrap().password, "");
+
+        // Enter with empty password
+        assert_eq!(pop.handle_key_input("", false, true, false, false), WifiPopoverAction::None);
+
+        // Type password and hit enter
+        pop.password_prompt.as_mut().unwrap().password = "mypassword".into();
+        assert_eq!(
+            pop.handle_key_input("", false, true, false, false),
+            WifiPopoverAction::SubmitPassword {
+                ssid: "OfficeWiFi".into(),
+                password: "mypassword".into(),
+            }
+        );
+        assert!(pop.password_prompt.as_ref().unwrap().is_connecting);
+
+        // Escape cancels
+        assert_eq!(pop.handle_key_input("", false, false, true, false), WifiPopoverAction::CancelPasswordPrompt);
+        assert!(pop.password_prompt.is_none());
+    }
+
+    #[test]
+    fn test_wifi_popover_password_prompt_rendering() {
+        let mut renderer = SoftwareRenderer::new("");
+        let mut buffer = vec![0u8; 340 * 350 * 4];
+        let config = Config::default();
+
+        let mut pop = WifiPopover::new(340, 350, true, "".into(), 0, vec![]);
+        pop.password_prompt = Some(WifiPasswordPrompt {
+            ssid: "MyProtectedNetwork".into(),
+            password: "supersecretpassword".into(),
+            show_password: false,
+            error_message: None,
+            is_connecting: false,
+        });
+
+        // Render masked password at frame 0 and frame 6 (cursor blink test)
+        pop.render(&mut renderer, &mut buffer, &config, 0);
+        pop.render(&mut renderer, &mut buffer, &config, 6);
+
+        // Render with password visible
+        pop.password_prompt.as_mut().unwrap().show_password = true;
+        pop.render(&mut renderer, &mut buffer, &config, 10);
+
+        // Render with error message
+        pop.password_prompt.as_mut().unwrap().error_message = Some("Incorrect password. Please try again.".into());
+        pop.render(&mut renderer, &mut buffer, &config, 15);
+
+        // Render while connecting
+        pop.password_prompt.as_mut().unwrap().is_connecting = true;
+        pop.render(&mut renderer, &mut buffer, &config, 20);
     }
 }

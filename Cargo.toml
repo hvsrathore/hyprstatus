@@ -1,6 +1,6 @@
 [package]
 name = "hyprstatus"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 authors = ["Harsh Vardhan <4444hv@gmail.com>"]
 license = "MIT"
@@ -28,4 +28,5 @@ tokio = { version = "1.54.1", features = ["full"] }
 toml = "1.1.8"
 wayland-client = "0.31.15"
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
+xkbcommon = { version = "0.8", features = ["wayland"] }
 zbus = "6.1.0"

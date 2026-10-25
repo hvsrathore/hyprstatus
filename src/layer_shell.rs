@@ -6,8 +6,8 @@ use crate::modules::clock::ClockModule;
 use crate::modules::network::NetworkModule;
 use crate::modules::perf::PerfModule;
 use crate::modules::popup::{
-    AudioPopover, AudioPopoverAction, BarPopover, PopoverKind, WifiPopover, WifiPopoverAction,
-    WorkspacePopup,
+    AudioPopover, AudioPopoverAction, BarPopover, PopoverKind, WifiPasswordPrompt,
+    WifiPopover, WifiPopoverAction, WorkspacePopup,
 };
 use crate::modules::screenshot::ScreenshotModule;
 use crate::modules::tray::TrayModule;
@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::os::fd::AsFd;
 use std::sync::Arc;
 use wayland_client::protocol::{
-    wl_buffer, wl_compositor, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_surface,
+    wl_buffer, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols_wlr::layer_shell::v1::client::{
@@ -103,6 +103,9 @@ pub struct BarState {
     pub layer_shell: Option<ZwlrLayerShellV1>,
     pub seat: Option<wl_seat::WlSeat>,
     pub pointer: Option<wl_pointer::WlPointer>,
+    pub keyboard: Option<wl_keyboard::WlKeyboard>,
+    pub xkb_context: xkbcommon::xkb::Context,
+    pub xkb_state: Option<xkbcommon::xkb::State>,
     pub outputs: HashMap<u32, (wl_output::WlOutput, Option<String>)>, // registry_id -> (output, name)
     pub bars: HashMap<u32, BarOutput>, // registry_id -> BarOutput
     pub renderer: SoftwareRenderer,
@@ -147,6 +150,9 @@ impl BarState {
             layer_shell: None,
             seat: None,
             pointer: None,
+            keyboard: None,
+            xkb_context: xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS),
+            xkb_state: None,
             outputs: HashMap::new(),
             bars: HashMap::new(),
             renderer,
@@ -707,7 +713,10 @@ impl BarState {
                                             }
                                             Err(_err) => {
                                                 // Password changed or authentication failure!
-                                                mod_net.set_status_message_async(Some(format!("Incorrect password for {}. Prompting...", s))).await;
+                                                mod_net.request_password_prompt_async(
+                                                    s.clone(),
+                                                    Some("Password invalid or changed. Please re-enter:".into()),
+                                                ).await;
                                                 let _ = tokio::process::Command::new("notify-send")
                                                     .args([
                                                         "-u",
@@ -715,56 +724,9 @@ impl BarState {
                                                         "-a",
                                                         "hyprstatus",
                                                         "Wi-Fi Authentication Failed",
-                                                        &format!("Connection to \"{}\" failed (password changed or invalid). Please enter the new password.", s),
+                                                        &format!("Connection to \"{}\" failed. Please enter the password.", s),
                                                     ])
                                                     .spawn();
-
-                                                // Prompt for the new password
-                                                if let Some(new_password) = NetworkModule::prompt_wifi_password(&s).await {
-                                                    let new_password = new_password.trim().to_string();
-                                                    if !new_password.is_empty() {
-                                                        // Delete stale profile so NetworkManager doesn't conflict
-                                                        let _ = NetworkModule::forget_wifi(&s).await;
-                                                        mod_net.set_status_message_async(Some(format!("Connecting to {}...", s))).await;
-
-                                                        match NetworkModule::connect_wifi_with_password(&s, &new_password).await {
-                                                            Ok(_) => {
-                                                                mod_net.set_status_message_async(Some(format!("Connected to {}", s))).await;
-                                                                let _ = tokio::process::Command::new("notify-send")
-                                                                    .args([
-                                                                        "-a",
-                                                                        "hyprstatus",
-                                                                        "-i",
-                                                                        "network-wireless-symbolic",
-                                                                        "Wi-Fi Connected",
-                                                                        &format!("Connected to {} with updated password.", s),
-                                                                    ])
-                                                                    .spawn();
-                                                            }
-                                                            Err(second_err) => {
-                                                                mod_net.set_status_message_async(Some(format!("Incorrect password for {}", s))).await;
-                                                                let _ = tokio::process::Command::new("notify-send")
-                                                                    .args([
-                                                                        "-u",
-                                                                        "critical",
-                                                                        "-a",
-                                                                        "hyprstatus",
-                                                                        "Wi-Fi Connection Failed",
-                                                                        &format!("Incorrect password for \"{}\": {}", s, second_err),
-                                                                    ])
-                                                                    .spawn();
-                                                            }
-                                                        }
-                                                    } else {
-                                                        mod_net.set_status_message_async(Some(format!("Incorrect password for {}", s))).await;
-                                                    }
-                                                } else {
-                                                    // Cancelled prompt
-                                                    mod_net.set_status_message_async(Some(format!("Incorrect password for {}", s))).await;
-                                                }
-
-                                                tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
-                                                mod_net.refresh_networks().await;
                                             }
                                         }
                                     });
@@ -805,52 +767,45 @@ impl BarState {
                                         mod_net.refresh_networks().await;
                                     });
                                 } else {
-                                    wifi.status_message = Some(format!("Prompting password for {}...", s));
-                                    wifi.status_timer = 0;
-                                    tokio::spawn(async move {
-                                        mod_net.set_status_message_async(Some(format!("Prompting password for {}...", s))).await;
-                                        if let Some(password) = NetworkModule::prompt_wifi_password(&s).await {
-                                            let password = password.trim().to_string();
-                                            if !password.is_empty() {
-                                                mod_net.set_status_message_async(Some(format!("Connecting to {}...", s))).await;
-                                                match NetworkModule::connect_wifi_with_password(&s, &password).await {
-                                                    Ok(_) => {
-                                                        mod_net.set_status_message_async(Some(format!("Connected to {}", s))).await;
-                                                        let _ = tokio::process::Command::new("notify-send")
-                                                            .args([
-                                                                "-a",
-                                                                "hyprstatus",
-                                                                "-i",
-                                                                "network-wireless-symbolic",
-                                                                "Wi-Fi Connected",
-                                                                &format!("Connected to {}", s),
-                                                            ])
-                                                            .spawn();
-                                                    }
-                                                    Err(err) => {
-                                                        mod_net.set_status_message_async(Some(format!("Incorrect password for {}", s))).await;
-                                                        let _ = tokio::process::Command::new("notify-send")
-                                                            .args([
-                                                                "-u",
-                                                                "critical",
-                                                                "-a",
-                                                                "hyprstatus",
-                                                                "Wi-Fi Authentication Failed",
-                                                                &format!("Incorrect password for \"{}\": {}", s, err),
-                                                            ])
-                                                            .spawn();
-                                                    }
-                                                }
-                                            } else {
-                                                mod_net.set_status_message_async(None).await;
-                                            }
-                                        } else {
-                                            mod_net.set_status_message_async(None).await;
-                                        }
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
-                                        mod_net.refresh_networks().await;
+                                    // Secured network (not saved yet):
+                                    // Prompt for password directly inside the same Wi-Fi popover menu
+                                    wifi.password_prompt = Some(WifiPasswordPrompt {
+                                        ssid: s.clone(),
+                                        password: String::new(),
+                                        show_password: false,
+                                        error_message: None,
+                                        is_connecting: false,
                                     });
+                                    if let Some(ls) = &bar.popup_layer_surface {
+                                        ls.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+                                        if let Some(surf) = &bar.popup_surface {
+                                            surf.commit();
+                                        }
+                                    }
                                 }
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::CancelPasswordPrompt => {
+                                wifi.password_prompt = None;
+                                if let Some(ls) = &bar.popup_layer_surface {
+                                    ls.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+                                    if let Some(surf) = &bar.popup_surface {
+                                        surf.commit();
+                                    }
+                                }
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::ToggleShowPassword => {
+                                if let Some(prompt) = &mut wifi.password_prompt {
+                                    prompt.show_password = !prompt.show_password;
+                                }
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::SubmitPassword { ssid, password } => {
+                                self.trigger_wifi_password_connect(qh, reg_id, ssid, password);
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::PasswordChanged => {
                                 rerender_popover = Some(reg_id);
                             }
                             WifiPopoverAction::Disconnect(ssid) => {
@@ -1162,6 +1117,133 @@ impl BarState {
         }
     }
 
+    pub fn trigger_wifi_password_connect(
+        &mut self,
+        qh: &QueueHandle<Self>,
+        reg_id: u32,
+        ssid: String,
+        password: String,
+    ) {
+        if let Some(bar) = self.bars.get_mut(&reg_id) {
+            if let PopoverKind::Wifi(wifi) = &mut bar.popover.kind {
+                if let Some(prompt) = &mut wifi.password_prompt {
+                    prompt.is_connecting = true;
+                    prompt.error_message = None;
+                }
+            }
+        }
+        self.render_popup(qh, reg_id);
+
+        let s = ssid.clone();
+        let pwd = password.clone();
+        let mod_net = self.mod_network.clone();
+
+        tokio::spawn(async move {
+            let _ = NetworkModule::forget_wifi(&s).await;
+            mod_net.set_status_message_async(Some(format!("Connecting to {}...", s))).await;
+
+            match NetworkModule::connect_wifi_with_password(&s, &pwd).await {
+                Ok(_) => {
+                    mod_net.set_status_message_async(Some(format!("Connected to {}", s))).await;
+                    mod_net.clear_password_prompt_async().await;
+                    let _ = tokio::process::Command::new("notify-send")
+                        .args([
+                            "-a",
+                            "hyprstatus",
+                            "-i",
+                            "network-wireless-symbolic",
+                            "Wi-Fi Connected",
+                            &format!("Connected to {}", s),
+                        ])
+                        .spawn();
+                    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+                    mod_net.refresh_networks().await;
+                }
+                Err(err) => {
+                    let user_msg = if err.to_lowercase().contains("secrets")
+                        || err.to_lowercase().contains("password")
+                        || err.to_lowercase().contains("authentication")
+                        || err.to_lowercase().contains("failed")
+                    {
+                        "Incorrect password. Please try again.".to_string()
+                    } else if !err.trim().is_empty() {
+                        err.trim().to_string()
+                    } else {
+                        "Connection failed. Please check password.".to_string()
+                    };
+
+                    mod_net.report_password_error_async(s.clone(), user_msg).await;
+                    let _ = tokio::process::Command::new("notify-send")
+                        .args([
+                            "-u",
+                            "critical",
+                            "-a",
+                            "hyprstatus",
+                            "Wi-Fi Connection Failed",
+                            &format!("Incorrect password for \"{}\"", s),
+                        ])
+                        .spawn();
+                }
+            }
+        });
+    }
+
+    pub fn handle_keyboard_key(&mut self, qh: &QueueHandle<Self>, key: u32) {
+        let (is_backspace, is_enter, is_escape, is_clear, text) = if let Some(xkb_state) = &mut self.xkb_state {
+            let keycode = (key + 8).into();
+            let keysym = xkb_state.key_get_one_sym(keycode);
+            let utf8 = xkb_state.key_get_utf8(keycode);
+            let raw_sym = keysym.raw();
+            let is_bs = raw_sym == xkbcommon::xkb::keysyms::KEY_BackSpace;
+            let is_ret = raw_sym == xkbcommon::xkb::keysyms::KEY_Return || raw_sym == xkbcommon::xkb::keysyms::KEY_KP_Enter;
+            let is_esc = raw_sym == xkbcommon::xkb::keysyms::KEY_Escape;
+            let is_clr = raw_sym == xkbcommon::xkb::keysyms::KEY_Clear;
+            (is_bs, is_ret, is_esc, is_clr, utf8)
+        } else {
+            (key == 14, key == 28 || key == 96, key == 1, false, String::new())
+        };
+
+        let mut rerender_popover = None;
+        let mut submit_info = None;
+
+        for (&reg_id, bar) in self.bars.iter_mut() {
+            if bar.popover.visible {
+                if let PopoverKind::Wifi(wifi) = &mut bar.popover.kind {
+                    if wifi.password_prompt.is_some() {
+                        let action = wifi.handle_key_input(&text, is_backspace, is_enter, is_escape, is_clear);
+                        match action {
+                            WifiPopoverAction::CancelPasswordPrompt => {
+                                if let Some(ls) = &bar.popup_layer_surface {
+                                    ls.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+                                    if let Some(surf) = &bar.popup_surface {
+                                        surf.commit();
+                                    }
+                                }
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::SubmitPassword { ssid, password } => {
+                                submit_info = Some((reg_id, ssid, password));
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::PasswordChanged => {
+                                rerender_popover = Some(reg_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((reg_id, ssid, password)) = submit_info {
+            self.trigger_wifi_password_connect(qh, reg_id, ssid, password);
+        }
+
+        if let Some(id) = rerender_popover {
+            self.render_popup(qh, id);
+        }
+    }
+
     pub fn handle_pointer_motion(&mut self, qh: &QueueHandle<Self>, x: f64, y: f64) {
         self.pointer_x = x;
         self.pointer_y = y;
@@ -1336,15 +1418,30 @@ impl BarState {
             layer_surface.set_margin(margin_top, 0, margin_bottom, margin_left);
             layer_surface.set_exclusive_zone(-1);
 
+            let kb_interactive = match &bar.popover.kind {
+                PopoverKind::Wifi(w) if w.password_prompt.is_some() => {
+                    zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive
+                }
+                _ => zwlr_layer_surface_v1::KeyboardInteractivity::None,
+            };
+            layer_surface.set_keyboard_interactivity(kb_interactive);
+
             surface.commit();
 
             bar.popup_surface = Some(surface);
             bar.popup_layer_surface = Some(layer_surface);
             bar.popup_configured = false;
         } else {
+            let kb_interactive = match &bar.popover.kind {
+                PopoverKind::Wifi(w) if w.password_prompt.is_some() => {
+                    zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive
+                }
+                _ => zwlr_layer_surface_v1::KeyboardInteractivity::None,
+            };
             if let Some(ls) = &bar.popup_layer_surface {
                 ls.set_size(pop_w, pop_h);
                 ls.set_margin(margin_top, 0, margin_bottom, margin_left);
+                ls.set_keyboard_interactivity(kb_interactive);
             }
             if let Some(s) = &bar.popup_surface {
                 s.commit();
@@ -1608,8 +1705,51 @@ impl BarState {
                         }
                     }
 
+                    // Check for pending password prompt requests (e.g. from failed saved connection)
+                    if let Some(req) = self.mod_network.take_pending_password_request() {
+                        wifi.password_prompt = Some(WifiPasswordPrompt {
+                            ssid: req.ssid,
+                            password: String::new(),
+                            show_password: false,
+                            error_message: req.error_message,
+                            is_connecting: false,
+                        });
+                        if let Some(ls) = &bar.popup_layer_surface {
+                            ls.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::Exclusive);
+                            if let Some(s) = &bar.popup_surface {
+                                s.commit();
+                            }
+                        }
+                        needs_redraw.push(reg_id);
+                    }
+
+                    // Check if password prompt was cleared upon successful connection
+                    if self.mod_network.take_password_cleared() {
+                        if wifi.password_prompt.is_some() {
+                            wifi.password_prompt = None;
+                            if let Some(ls) = &bar.popup_layer_surface {
+                                ls.set_keyboard_interactivity(zwlr_layer_surface_v1::KeyboardInteractivity::None);
+                                if let Some(s) = &bar.popup_surface {
+                                    s.commit();
+                                }
+                            }
+                            needs_redraw.push(reg_id);
+                        }
+                    }
+
+                    // Check for password error reported by connection attempt
+                    if let Some((err_ssid, err_msg)) = self.mod_network.take_password_error() {
+                        if let Some(prompt) = &mut wifi.password_prompt {
+                            if prompt.ssid == err_ssid {
+                                prompt.is_connecting = false;
+                                prompt.error_message = Some(err_msg);
+                                needs_redraw.push(reg_id);
+                            }
+                        }
+                    }
+
                     // Periodic active refresh every ~2.5s (35 frames) while popover is open
-                    if bar.popover.anim_frame % 35 == 0 && enabled && !wifi.is_scanning {
+                    if bar.popover.anim_frame % 35 == 0 && enabled && !wifi.is_scanning && wifi.password_prompt.is_none() {
                         let mod_net = self.mod_network.clone();
                         tokio::spawn(async move {
                             mod_net.refresh_networks().await;
@@ -1932,7 +2072,68 @@ impl Dispatch<wl_seat::WlSeat, ()> for BarState {
                     let pointer = seat.get_pointer(qh, ());
                     state.pointer = Some(pointer);
                 }
+                if caps.contains(wl_seat::Capability::Keyboard) && state.keyboard.is_none() {
+                    let keyboard = seat.get_keyboard(qh, ());
+                    state.keyboard = Some(keyboard);
+                }
             }
+        }
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for BarState {
+    fn event(
+        state: &mut Self,
+        _: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_keyboard::Event::Keymap { format, fd, size } => {
+                if format == wayland_client::WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) {
+                    unsafe {
+                        if let Ok(Some(keymap)) = xkbcommon::xkb::Keymap::new_from_fd(
+                            &state.xkb_context,
+                            fd,
+                            size as usize,
+                            xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1,
+                            xkbcommon::xkb::COMPILE_NO_FLAGS,
+                        ) {
+                            state.xkb_state = Some(xkbcommon::xkb::State::new(&keymap));
+                        }
+                    }
+                }
+            }
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                if let Some(xkb_state) = &mut state.xkb_state {
+                    xkb_state.update_mask(
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        0,
+                        0,
+                        group,
+                    );
+                }
+            }
+            wl_keyboard::Event::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
+                if key_state == wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed) {
+                    state.handle_keyboard_key(qh, key);
+                }
+            }
+            _ => {}
         }
     }
 }

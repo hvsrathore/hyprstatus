@@ -45,6 +45,9 @@ pub struct NetworkModule {
     cached_networks: Arc<RwLock<Vec<crate::modules::popup::WifiNetworkItem>>>,
     wifi_enabled: Arc<std::sync::atomic::AtomicBool>,
     status_message: Arc<RwLock<Option<String>>>,
+    pending_password_request: Arc<RwLock<Option<crate::modules::popup::WifiPasswordRequest>>>,
+    password_error: Arc<RwLock<Option<(String, String)>>>,
+    password_cleared: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NetworkModule {
@@ -53,11 +56,17 @@ impl NetworkModule {
         let cached_networks = Arc::new(RwLock::new(Self::query_wifi_networks_sync()));
         let wifi_enabled = Arc::new(std::sync::atomic::AtomicBool::new(Self::is_wifi_enabled_sync()));
         let status_message = Arc::new(RwLock::new(None));
+        let pending_password_request = Arc::new(RwLock::new(None));
+        let password_error = Arc::new(RwLock::new(None));
+        let password_cleared = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let module = Self {
             state: state.clone(),
             cached_networks: cached_networks.clone(),
             wifi_enabled: wifi_enabled.clone(),
             status_message: status_message.clone(),
+            pending_password_request,
+            password_error,
+            password_cleared,
         };
 
         module.spawn_monitor(state, cached_networks, wifi_enabled);
@@ -97,6 +106,40 @@ impl NetworkModule {
     pub async fn set_status_message_async(&self, msg: Option<String>) {
         let mut lock = self.status_message.write().await;
         *lock = msg;
+    }
+
+    pub async fn request_password_prompt_async(&self, ssid: String, error_message: Option<String>) {
+        let mut lock = self.pending_password_request.write().await;
+        *lock = Some(crate::modules::popup::WifiPasswordRequest { ssid, error_message });
+    }
+
+    pub fn take_pending_password_request(&self) -> Option<crate::modules::popup::WifiPasswordRequest> {
+        if let Ok(mut lock) = self.pending_password_request.try_write() {
+            lock.take()
+        } else {
+            None
+        }
+    }
+
+    pub async fn report_password_error_async(&self, ssid: String, error: String) {
+        let mut lock = self.password_error.write().await;
+        *lock = Some((ssid, error));
+    }
+
+    pub fn take_password_error(&self) -> Option<(String, String)> {
+        if let Ok(mut lock) = self.password_error.try_write() {
+            lock.take()
+        } else {
+            None
+        }
+    }
+
+    pub async fn clear_password_prompt_async(&self) {
+        self.password_cleared.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn take_password_cleared(&self) -> bool {
+        self.password_cleared.swap(false, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn refresh_networks(&self) {

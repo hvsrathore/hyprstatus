@@ -47,7 +47,7 @@
     </td>
     <td width="50%">
       <h3>📶 Live Wi-Fi Popover & Auth</h3>
-      Real-time Wi-Fi management widget featuring radio toggle, dynamic signal waves, auto-rescanning, and 1-click connect/disconnect. Supports open networks and native password prompts via <code>wofi</code> for secured APs.
+      Real-time Wi-Fi management widget featuring radio toggle, dynamic signal waves, auto-rescanning, 1-click connect/disconnect, and an integrated in-popover password prompt with live masking, cursor animation, and error feedback.
     </td>
   </tr>
   <tr>
@@ -89,7 +89,7 @@ hyprstatus replaces clunky terminal launchers and heavyweight modals with bespok
 * **Wi-Fi Radio Toggle**: Turn Wi-Fi radio ON or OFF with a single click.
 * **Real-Time Network Discovery**: Dynamic periodic scanning reflects newly appeared or turned-off hotspots in real time without stale ghost entries.
 * **Signal Strength Indicators**: Dynamic wave glyphs (`󰤨`, `󰤥`, `󰤢`, `󰤟`, `󰤮`) indicating exact reception.
-* **Password Authentication**: Automatically prompts for Wi-Fi passwords via `wofi --password` for new secure networks, while saved connections link automatically.
+* **In-Popover Password Authentication**: Secure networks prompt for credentials directly inside the Wi-Fi popover with full keyboard support, password visibility toggle, and instant error feedback—no external modal windows needed.
 * **Terminal Fallback**: Click "Network Manager Settings" or right-click the bar module to launch `nmtui` in your favorite terminal (`kitty`, `alacritty`, `foot`, etc.).
 
 ### 3. 🪟 Workspace Layout Wireframes
@@ -173,7 +173,7 @@ flowchart TD
 | **Sound Popover** | Mic Mute Button | Toggle microphone mute |
 | **Network Block** | Left Click | Open native Wi-Fi Quick Settings popover |
 | **Network Block** | Right Click | Launch `nmtui` in terminal |
-| **Wi-Fi Popover** | Network Row Click | Connect to network (prompts for password via `wofi` if needed) |
+| **Wi-Fi Popover** | Network Row Click | Connect to network (prompts for password directly in popover if needed) |
 | **Wi-Fi Popover** | Radio / Rescan Buttons | Toggle Wi-Fi radio ON/OFF or trigger fresh scan |
 | **Performance Block**| Left Click | Launch `btop` / `htop` system monitor |
 | **Tray Icon** | Left Click | Forward `Activate` DBus call to application |
