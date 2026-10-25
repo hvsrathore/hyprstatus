@@ -104,6 +104,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         AsyncFd::register_with_interest(WaylandFd(conn.clone()), tokio::io::Interest::READABLE)?
     };
     let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(1000));
+    let mut anim_interval = tokio::time::interval(tokio::time::Duration::from_millis(70));
+    anim_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         // 1. Dispatch any pending Wayland messages already in queue
@@ -114,6 +116,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let read_guard = event_queue.prepare_read();
 
         tokio::select! {
+            _ = anim_interval.tick(), if state.has_visible_popover() => {
+                std::mem::drop(read_guard);
+                state.anim_tick(&qh);
+                conn.flush()?;
+            }
             res = async_fd.readable() => {
                 let mut ready_guard = res?;
                 ready_guard.clear_ready();

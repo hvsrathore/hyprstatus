@@ -293,6 +293,7 @@ impl AudioPopover {
         renderer: &mut SoftwareRenderer,
         buffer: &mut [u8],
         config: &Config,
+        anim_frame: u32,
     ) {
         let bg_color = parse_hex_color("#181825");
         let border_color = parse_hex_color(&config.colors.audio);
@@ -330,6 +331,41 @@ impl AudioPopover {
             12.0,
             accent_color,
         );
+
+        // Subtle dancing equalizer visualizer (5 bars) next to the header
+        let eq_base_x = 236;
+        let eq_base_y = 26;
+        let eq_bar_w = 4;
+        let eq_gap = 2;
+        for i in 0..5 {
+            let bar_h = if self.sink_muted {
+                2
+            } else {
+                let t = anim_frame as f32 * 0.22 + i as f32 * 1.25;
+                let h_norm = ((t.sin() + (t * 0.7).cos()) * 0.5 + 1.0) * 0.5;
+                (3.0 + h_norm * 11.0).round() as u32
+            };
+            let bx = eq_base_x + i as i32 * (eq_bar_w + eq_gap);
+            let by = eq_base_y - bar_h as i32;
+            let eq_color = if self.sink_muted {
+                parse_hex_color("#585b70")
+            } else {
+                accent_color
+            };
+            SoftwareRenderer::draw_rounded_rect(
+                buffer,
+                self.width,
+                self.height,
+                bx,
+                by,
+                eq_bar_w as u32,
+                bar_h,
+                1,
+                eq_color,
+                None,
+                0,
+            );
+        }
 
         // Subtitle: Output Sink
         renderer.draw_text(
@@ -402,6 +438,34 @@ impl AudioPopover {
             );
         }
 
+        // Tactile slider thumb with glowing accent border
+        let thumb_cx = 16 + fill_w as i32;
+        let thumb_x = (thumb_cx - 5).clamp(16, 16 + 288 - 10);
+        let (thumb_bg, thumb_border) = if self.sink_muted {
+            (parse_hex_color("#45475a"), parse_hex_color("#585b70"))
+        } else {
+            let breathe = (anim_frame as f32 * 0.14).sin() * 0.5 + 0.5;
+            let glow = if breathe > 0.5 {
+                parse_hex_color("#ffffff")
+            } else {
+                accent_color
+            };
+            (accent_color, glow)
+        };
+        SoftwareRenderer::draw_rounded_rect(
+            buffer,
+            self.width,
+            self.height,
+            thumb_x,
+            62,
+            10,
+            22,
+            4,
+            thumb_bg,
+            Some(thumb_border),
+            1,
+        );
+
         // Quick Step & Mute buttons (y = 92, h = 26)
         // 1. [-] button
         SoftwareRenderer::draw_rounded_rect(buffer, self.width, self.height, 16, 92, 55, 26, 4, block_bg, Some(border_subtle), 1);
@@ -438,9 +502,14 @@ impl AudioPopover {
 
         // Microphone input row
         renderer.draw_text(buffer, self.width, self.height, "Microphone Input", 16, 172, 10.0, text_color);
-        let mic_status = if self.source_muted { "MUTED" } else { "ACTIVE" };
-        let mic_status_color = if self.source_muted { red_color } else { green_color };
-        renderer.draw_text(buffer, self.width, self.height, mic_status, 258, 172, 9.5, mic_status_color);
+        if self.source_muted {
+            renderer.draw_text(buffer, self.width, self.height, "● MUTED", 248, 172, 9.5, red_color);
+        } else {
+            let pulse = (anim_frame as f32 * 0.16).sin() * 0.5 + 0.5;
+            let mic_color = if pulse > 0.5 { green_color } else { parse_hex_color("#94e2d5") };
+            let dot = if pulse > 0.6 { "●" } else { "○" };
+            renderer.draw_text(buffer, self.width, self.height, &format!("{} LIVE", dot), 250, 172, 9.5, mic_color);
+        }
 
         // Mic toggle button (y = 182, h = 28)
         let (mic_btn_border, mic_btn_fg, mic_btn_text) = if self.source_muted {
@@ -455,7 +524,7 @@ impl AudioPopover {
 
 // -------------------------------- Wi-Fi Popover --------------------------------
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WifiNetworkItem {
     pub in_use: bool,
     pub ssid: String,
@@ -472,6 +541,7 @@ pub struct WifiPopover {
     pub active_signal: u32,
     pub networks: Vec<WifiNetworkItem>,
     pub status_message: Option<String>,
+    pub is_scanning: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,6 +572,7 @@ impl WifiPopover {
             active_signal,
             networks,
             status_message: None,
+            is_scanning: false,
         }
     }
 
@@ -546,6 +617,7 @@ impl WifiPopover {
         renderer: &mut SoftwareRenderer,
         buffer: &mut [u8],
         config: &Config,
+        anim_frame: u32,
     ) {
         let bg_color = parse_hex_color("#181825");
         let border_color = parse_hex_color(&config.colors.network);
@@ -584,21 +656,46 @@ impl WifiPopover {
             accent_color,
         );
 
-        // Rescan button
+        // Rescan button with rotating spinner animation when scanning
+        let (scan_icon, scan_text, scan_border) = if self.is_scanning {
+            let spinner = match (anim_frame / 2) % 4 {
+                0 => "󰑐",
+                1 => "󰑑",
+                2 => "󰑒",
+                _ => "󰑓",
+            };
+            let dots = match (anim_frame / 4) % 3 {
+                0 => "Scan.",
+                1 => "Scan..",
+                _ => "Scan...",
+            };
+            (spinner, dots, accent_color)
+        } else {
+            ("󰑐", "Scan", border_subtle)
+        };
         SoftwareRenderer::draw_rounded_rect(
             buffer,
             self.width,
             self.height,
-            236,
+            226,
             8,
-            60,
+            70,
             22,
             4,
             block_bg,
-            Some(border_subtle),
+            Some(scan_border),
             1,
         );
-        renderer.draw_text(buffer, self.width, self.height, "󰑐 Scan", 244, 22, 9.0, text_color);
+        renderer.draw_text(
+            buffer,
+            self.width,
+            self.height,
+            &format!("{} {}", scan_icon, scan_text),
+            230,
+            22,
+            8.5,
+            text_color,
+        );
 
         // Close button [✕]
         SoftwareRenderer::draw_rounded_rect(
@@ -646,25 +743,73 @@ impl WifiPopover {
         );
         renderer.draw_text(buffer, self.width, self.height, toggle_text, 246, 54, 9.0, parse_hex_color("#11111b"));
 
-        // Divider
-        SoftwareRenderer::draw_rect(buffer, self.width, self.height, 16, 72, 308, 1, border_subtle);
-
-        // Available Networks subtitle
-        renderer.draw_text(buffer, self.width, self.height, "Available Networks", 16, 86, 9.5, muted_text);
+        // Status banner if present (e.g. "Connecting to 3a Pro...", "Scanning...")
+        let list_start_y = if let Some(ref msg) = self.status_message {
+            let is_connecting = msg.contains("Connecting") || msg.contains("Scanning");
+            let msg_color = if is_connecting {
+                accent_color
+            } else if msg.contains("Failed") || msg.contains("Error") {
+                red_color
+            } else {
+                green_color
+            };
+            SoftwareRenderer::draw_rounded_rect(
+                buffer,
+                self.width,
+                self.height,
+                16,
+                68,
+                308,
+                20,
+                4,
+                parse_hex_color("#1e1e2e"),
+                Some(msg_color),
+                1,
+            );
+            let display_msg = if is_connecting {
+                let waves = match (anim_frame / 3) % 4 {
+                    0 => "󰤟",
+                    1 => "󰤢",
+                    2 => "󰤥",
+                    _ => "󰤨",
+                };
+                format!("{} {}", waves, msg)
+            } else {
+                format!("󰄬 {}", msg)
+            };
+            renderer.draw_text(buffer, self.width, self.height, &display_msg, 22, 82, 8.5, msg_color);
+            94
+        } else {
+            SoftwareRenderer::draw_rect(buffer, self.width, self.height, 16, 72, 308, 1, border_subtle);
+            renderer.draw_text(buffer, self.width, self.height, "Available Networks", 16, 86, 9.5, muted_text);
+            94
+        };
 
         // Networks list
         if self.networks.is_empty() {
             let msg = if !self.wifi_enabled {
                 "Wi-Fi is turned off"
+            } else if self.is_scanning {
+                "Scanning for nearby Wi-Fi networks..."
             } else {
                 "No Wi-Fi networks found"
             };
             renderer.draw_text(buffer, self.width, self.height, msg, 16, 130, 10.5, muted_text);
         } else {
             for (i, net) in self.networks.iter().take(5).enumerate() {
-                let row_y = 94 + (i as i32) * 38;
+                let row_y = list_start_y + (i as i32) * 38;
+                let is_connecting_this = self.status_message.as_ref().map_or(false, |m| m.contains(&net.ssid) && m.contains("Connecting"));
+
                 let (row_bg, row_border, row_border_w) = if net.in_use {
-                    (parse_hex_color("#1e2030"), parse_hex_color(&config.colors.active_workspace_bg), 1)
+                    let breathe = (anim_frame as f32 * 0.14).sin() * 0.5 + 0.5;
+                    let b_color = if breathe > 0.5 {
+                        accent_color
+                    } else {
+                        parse_hex_color("#b4befe")
+                    };
+                    (parse_hex_color("#1e2030"), b_color, 1)
+                } else if is_connecting_this {
+                    (parse_hex_color("#1e2030"), accent_color, 1)
                 } else {
                     (parse_hex_color("#1e1e2e"), border_subtle, 1)
                 };
@@ -724,6 +869,27 @@ impl WifiPopover {
                         0,
                     );
                     renderer.draw_text(buffer, self.width, self.height, "󰄬 Connected", 232, row_y + 20, 8.5, parse_hex_color("#11111b"));
+                } else if is_connecting_this {
+                    let dots = match (anim_frame / 3) % 4 {
+                        0 => "Wait",
+                        1 => "Wait.",
+                        2 => "Wait..",
+                        _ => "Wait...",
+                    };
+                    SoftwareRenderer::draw_rounded_rect(
+                        buffer,
+                        self.width,
+                        self.height,
+                        240,
+                        row_y + 6,
+                        76,
+                        22,
+                        4,
+                        parse_hex_color("#313244"),
+                        Some(accent_color),
+                        1,
+                    );
+                    renderer.draw_text(buffer, self.width, self.height, dots, 252, row_y + 20, 8.5, accent_color);
                 } else {
                     SoftwareRenderer::draw_rounded_rect(
                         buffer,
@@ -786,6 +952,7 @@ pub struct BarPopover {
     pub anchor_x: i32,
     pub width: u32,
     pub height: u32,
+    pub anim_frame: u32,
 }
 
 impl BarPopover {
@@ -796,6 +963,7 @@ impl BarPopover {
             anchor_x: 0,
             width: 260,
             height: 160,
+            anim_frame: 0,
         }
     }
 
@@ -811,8 +979,8 @@ impl BarPopover {
         match &self.kind {
             PopoverKind::None => {}
             PopoverKind::Workspace(ws) => ws.render(renderer, buffer, config),
-            PopoverKind::Audio(audio) => audio.render(renderer, buffer, config),
-            PopoverKind::Wifi(wifi) => wifi.render(renderer, buffer, config),
+            PopoverKind::Audio(audio) => audio.render(renderer, buffer, config, self.anim_frame),
+            PopoverKind::Wifi(wifi) => wifi.render(renderer, buffer, config, self.anim_frame),
         }
     }
 }
@@ -857,5 +1025,31 @@ mod tests {
         assert_eq!(pop.handle_click(50, 110), WifiPopoverAction::Disconnect("HomeWiFi".into()));
         // Advanced nmtui button
         assert_eq!(pop.handle_click(50, 320), WifiPopoverAction::OpenNmtui);
+    }
+
+    #[test]
+    fn test_popover_animation_rendering() {
+        let mut renderer = SoftwareRenderer::new("");
+        let mut buffer = vec![0u8; 340 * 350 * 4];
+        let config = Config::default();
+
+        let net = WifiNetworkItem {
+            in_use: true,
+            ssid: "HomeWiFi".into(),
+            signal: 85,
+            security: "WPA2".into(),
+        };
+        let mut pop = WifiPopover::new(340, 350, true, "HomeWiFi".into(), 85, vec![net]);
+        pop.is_scanning = true;
+        pop.status_message = Some("Connecting to HomeWiFi...".into());
+
+        // Render at frame 0 and frame 15 - ensures no panic with animation math
+        pop.render(&mut renderer, &mut buffer, &config, 0);
+        pop.render(&mut renderer, &mut buffer, &config, 15);
+
+        let audio_pop = AudioPopover::new(320, 240, 60, false, false, "Test Sink".into());
+        let mut audio_buf = vec![0u8; 320 * 240 * 4];
+        audio_pop.render(&mut renderer, &mut audio_buf, &config, 0);
+        audio_pop.render(&mut renderer, &mut audio_buf, &config, 30);
     }
 }

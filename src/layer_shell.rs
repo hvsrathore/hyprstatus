@@ -630,30 +630,49 @@ impl BarState {
                             }
                             WifiPopoverAction::ToggleRadio => {
                                 wifi.wifi_enabled = !wifi.wifi_enabled;
+                                wifi.status_message = Some(if wifi.wifi_enabled {
+                                    "Turning Wi-Fi on...".into()
+                                } else {
+                                    "Wi-Fi turned off".into()
+                                });
+                                let mod_net = self.mod_network.clone();
                                 tokio::spawn(async move {
                                     NetworkModule::toggle_wifi_radio().await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+                                    mod_net.refresh_networks().await;
                                 });
                                 rerender_popover = Some(reg_id);
                             }
                             WifiPopoverAction::Rescan => {
+                                wifi.is_scanning = true;
+                                wifi.status_message = Some("Scanning for networks...".into());
+                                let mod_net = self.mod_network.clone();
                                 tokio::spawn(async move {
-                                    NetworkModule::rescan_wifi().await;
+                                    mod_net.trigger_rescan().await;
                                 });
                                 rerender_popover = Some(reg_id);
                             }
                             WifiPopoverAction::Connect(ssid) => {
+                                wifi.status_message = Some(format!("Connecting to {}...", ssid));
                                 let s = ssid.clone();
+                                let mod_net = self.mod_network.clone();
                                 tokio::spawn(async move {
                                     let _ = NetworkModule::connect_wifi(&s).await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+                                    mod_net.refresh_networks().await;
                                 });
-                                hide_reg_id = Some(reg_id);
+                                rerender_popover = Some(reg_id);
                             }
                             WifiPopoverAction::Disconnect(ssid) => {
+                                wifi.status_message = Some(format!("Disconnecting from {}...", ssid));
                                 let s = ssid.clone();
+                                let mod_net = self.mod_network.clone();
                                 tokio::spawn(async move {
                                     NetworkModule::disconnect_wifi(&s).await;
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+                                    mod_net.refresh_networks().await;
                                 });
-                                hide_reg_id = Some(reg_id);
+                                rerender_popover = Some(reg_id);
                             }
                             WifiPopoverAction::OpenNmtui => {
                                 hide_reg_id = Some(reg_id);
@@ -1056,6 +1075,7 @@ impl BarState {
             bar.popover.kind = PopoverKind::Audio(audio_pop);
             bar.popover.width = 320;
             bar.popover.height = 240;
+            bar.popover.anim_frame = 0;
         }
 
         self.show_popover_surface(qh, reg_id, anchor_x);
@@ -1069,8 +1089,11 @@ impl BarState {
             }
         }
 
-        let enabled = NetworkModule::is_wifi_enabled_sync();
-        let networks = NetworkModule::query_wifi_networks_sync();
+        let enabled = self.mod_network.get_wifi_enabled();
+        let mut networks = self.mod_network.get_cached_networks();
+        if networks.is_empty() && enabled {
+            networks = NetworkModule::query_wifi_networks_sync();
+        }
         let net_state = self.mod_network.get_state();
 
         let wifi_pop = WifiPopover::new(
@@ -1086,6 +1109,7 @@ impl BarState {
             bar.popover.kind = PopoverKind::Wifi(wifi_pop);
             bar.popover.width = 340;
             bar.popover.height = 350;
+            bar.popover.anim_frame = 0;
         }
 
         self.show_popover_surface(qh, reg_id, anchor_x);
@@ -1157,6 +1181,74 @@ impl BarState {
             s.attach(Some(&pbuf.buffer), 0, 0);
             s.damage_buffer(0, 0, pw as i32, ph as i32);
             s.commit();
+        }
+    }
+
+    pub fn has_visible_popover(&self) -> bool {
+        self.bars.values().any(|b| b.popover.visible)
+    }
+
+    pub fn anim_tick(&mut self, qh: &QueueHandle<Self>) {
+        let mut needs_redraw = Vec::new();
+
+        for (&reg_id, bar) in self.bars.iter_mut() {
+            if !bar.popover.visible {
+                continue;
+            }
+            bar.popover.anim_frame = bar.popover.anim_frame.wrapping_add(1);
+
+            match &mut bar.popover.kind {
+                PopoverKind::Audio(audio) => {
+                    let vol = self.mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
+                    let sink_muted = self.mod_audio.state.sink_muted.load(std::sync::atomic::Ordering::Relaxed);
+                    let source_muted = self.mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
+
+                    if !self.pointer_pressed {
+                        audio.volume = vol;
+                    }
+                    audio.sink_muted = sink_muted;
+                    audio.source_muted = source_muted;
+                    needs_redraw.push(reg_id);
+                }
+                PopoverKind::Wifi(wifi) => {
+                    let enabled = self.mod_network.get_wifi_enabled();
+                    wifi.wifi_enabled = enabled;
+
+                    let net_state = self.mod_network.get_state();
+                    wifi.active_ssid = net_state.ssid.clone();
+                    wifi.active_signal = net_state.signal_percent;
+
+                    let cached = self.mod_network.get_cached_networks();
+                    if !cached.is_empty() {
+                        wifi.networks = cached;
+                    }
+
+                    // Reset scanning state after a brief delay (~20 frames = ~1.4s)
+                    if wifi.is_scanning && bar.popover.anim_frame % 20 == 0 {
+                        wifi.is_scanning = false;
+                        if wifi.status_message.as_deref() == Some("Scanning for networks...") {
+                            wifi.status_message = None;
+                        }
+                    }
+
+                    if let Some(ref msg) = wifi.status_message {
+                        if msg.starts_with("Connecting to ") {
+                            let target = msg.trim_start_matches("Connecting to ").trim_end_matches("...");
+                            if !wifi.active_ssid.is_empty() && wifi.active_ssid == target {
+                                wifi.status_message = Some(format!("Connected to {}", target));
+                            }
+                        }
+                    }
+
+                    needs_redraw.push(reg_id);
+                }
+                PopoverKind::Workspace(_) => {}
+                PopoverKind::None => {}
+            }
+        }
+
+        for reg_id in needs_redraw {
+            self.render_popup(qh, reg_id);
         }
     }
 }

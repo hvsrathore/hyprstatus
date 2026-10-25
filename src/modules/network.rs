@@ -39,21 +39,57 @@ impl Default for NetState {
     }
 }
 
+#[derive(Clone)]
 pub struct NetworkModule {
     state: Arc<RwLock<NetState>>,
+    cached_networks: Arc<RwLock<Vec<crate::modules::popup::WifiNetworkItem>>>,
+    wifi_enabled: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl NetworkModule {
     pub fn new() -> Self {
         let state = Arc::new(RwLock::new(NetState::default()));
-        let module = Self { state: state.clone() };
+        let cached_networks = Arc::new(RwLock::new(Self::query_wifi_networks_sync()));
+        let wifi_enabled = Arc::new(std::sync::atomic::AtomicBool::new(Self::is_wifi_enabled_sync()));
+        let module = Self {
+            state: state.clone(),
+            cached_networks: cached_networks.clone(),
+            wifi_enabled: wifi_enabled.clone(),
+        };
 
-        module.spawn_monitor(state);
+        module.spawn_monitor(state, cached_networks, wifi_enabled);
         module
     }
 
     pub fn get_state(&self) -> NetState {
         self.state.try_read().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    pub fn get_cached_networks(&self) -> Vec<crate::modules::popup::WifiNetworkItem> {
+        self.cached_networks.try_read().map(|n| n.clone()).unwrap_or_default()
+    }
+
+    pub fn get_wifi_enabled(&self) -> bool {
+        self.wifi_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub async fn refresh_networks(&self) {
+        let is_enabled = Self::is_wifi_enabled().await;
+        self.wifi_enabled.store(is_enabled, std::sync::atomic::Ordering::Relaxed);
+        if is_enabled {
+            let fresh = Self::query_wifi_networks().await;
+            let mut cn = self.cached_networks.write().await;
+            *cn = fresh;
+        } else {
+            let mut cn = self.cached_networks.write().await;
+            cn.clear();
+        }
+    }
+
+    pub async fn trigger_rescan(&self) {
+        Self::rescan_wifi().await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
+        self.refresh_networks().await;
     }
 
     pub fn query_wifi_networks_sync() -> Vec<crate::modules::popup::WifiNetworkItem> {
@@ -179,7 +215,12 @@ impl NetworkModule {
             .await;
     }
 
-    fn spawn_monitor(&self, state: Arc<RwLock<NetState>>) {
+    fn spawn_monitor(
+        &self,
+        state: Arc<RwLock<NetState>>,
+        cached_networks: Arc<RwLock<Vec<crate::modules::popup::WifiNetworkItem>>>,
+        wifi_enabled: Arc<std::sync::atomic::AtomicBool>,
+    ) {
         tokio::spawn(async move {
             let mut last_sample_time = Instant::now();
             let mut last_rx: HashMap<String, u64> = HashMap::new();
@@ -234,6 +275,17 @@ impl NetworkModule {
                 {
                     let mut st = state.write().await;
                     *st = current_state;
+                }
+
+                // Check wifi radio & refresh cached networks
+                let is_enabled = Self::is_wifi_enabled_sync();
+                wifi_enabled.store(is_enabled, std::sync::atomic::Ordering::Relaxed);
+                if is_enabled {
+                    let fresh = Self::query_wifi_networks_sync();
+                    if !fresh.is_empty() {
+                        let mut cn = cached_networks.write().await;
+                        *cn = fresh;
+                    }
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(1500)).await;
