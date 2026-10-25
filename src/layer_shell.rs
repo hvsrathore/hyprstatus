@@ -922,9 +922,7 @@ impl BarState {
                     });
                 }
                 ClickAction::ScreenshotClick(out_name) => {
-                    // Close any dropdown popovers so they don't block the screen,
-                    // but the status bar itself remains completely visible on top.
-                    self.hide_all_popovers();
+                    // Do NOT close popovers: keep any open menus/popovers visible so they are captured in the screenshot.
                     self.mod_screenshot.trigger_flash();
 
                     // Re-render bars immediately to display visual flash feedback
@@ -940,8 +938,6 @@ impl BarState {
                     };
 
                     tokio::spawn(async move {
-                        // Brief pause to allow compositor to flush any closed popovers
-                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                         match ScreenshotModule::capture(&config, Some(&out_name), all_monitors).await {
                             Ok(path) => {
                                 println!("[screenshot] Screen captured successfully to {}", path.display());
