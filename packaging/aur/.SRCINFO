@@ -18,6 +18,6 @@ pkgbase = hyprstatus
 	optdepends = libnotify: Desktop notification banners with thumbnail previews
 	optdepends = ttf-jetbrains-mono-nerd: Default Nerd Font glyphs, icons, and sparklines
 	source = hyprstatus-1.0.0.tar.gz::https://github.com/hvsrathore/hyprstatus/archive/refs/tags/v1.0.0.tar.gz
-	sha256sums = 7c48573929ad00e6355e6acb062ca34e493b85b8f9e12d2164d4402781acc50e
+	sha256sums = 12aa7834bb6207cf38589d5722eba2bf976ea3f550439b735439ab8e665f3ffe
 
 pkgname = hyprstatus
