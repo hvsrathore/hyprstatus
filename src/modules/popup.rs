@@ -594,6 +594,7 @@ pub struct WifiNetworkItem {
     pub ssid: String,
     pub signal: u32,
     pub security: String,
+    pub is_saved: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -605,6 +606,7 @@ pub struct WifiPopover {
     pub active_signal: u32,
     pub networks: Vec<WifiNetworkItem>,
     pub status_message: Option<String>,
+    pub status_timer: u32,
     pub is_scanning: bool,
 }
 
@@ -615,6 +617,7 @@ pub enum WifiPopoverAction {
     Rescan,
     Connect(String),
     Disconnect(String),
+    Forget(String),
     OpenNmtui,
     Close,
 }
@@ -636,6 +639,7 @@ impl WifiPopover {
             active_signal,
             networks,
             status_message: None,
+            status_timer: 0,
             is_scanning: false,
         }
     }
@@ -659,11 +663,18 @@ impl WifiPopover {
         // Network items list (up to 5 items): y: 94 + i * 38
         for (i, net) in self.networks.iter().take(5).enumerate() {
             let row_y = 94 + (i as i32) * 38;
-            if click_x >= 16 && click_x <= 324 && click_y >= row_y && click_y <= row_y + 34 {
-                if net.in_use {
-                    return WifiPopoverAction::Disconnect(net.ssid.clone());
-                } else {
-                    return WifiPopoverAction::Connect(net.ssid.clone());
+            if click_y >= row_y && click_y <= row_y + 34 {
+                // If net is saved, clicking the trash/forget button: x: 288..322
+                if net.is_saved && click_x >= 288 && click_x <= 322 {
+                    return WifiPopoverAction::Forget(net.ssid.clone());
+                }
+
+                if click_x >= 16 && click_x <= 324 {
+                    if net.in_use {
+                        return WifiPopoverAction::Disconnect(net.ssid.clone());
+                    } else {
+                        return WifiPopoverAction::Connect(net.ssid.clone());
+                    }
                 }
             }
         }
@@ -809,11 +820,12 @@ impl WifiPopover {
 
         // Status banner if present (e.g. "Connecting to 3a Pro...", "Scanning...")
         let list_start_y = if let Some(ref msg) = self.status_message {
-            let is_connecting = msg.contains("Connecting") || msg.contains("Scanning");
-            let msg_color = if is_connecting {
-                accent_color
-            } else if msg.contains("Failed") || msg.contains("Error") {
+            let is_connecting = msg.contains("Connecting") || msg.contains("Scanning") || msg.contains("Prompting");
+            let is_failed = msg.contains("Failed") || msg.contains("Error") || msg.contains("Incorrect") || msg.contains("Wrong");
+            let msg_color = if is_failed {
                 red_color
+            } else if is_connecting {
+                accent_color
             } else {
                 green_color
             };
@@ -830,7 +842,9 @@ impl WifiPopover {
                 Some(msg_color),
                 1,
             );
-            let display_msg = if is_connecting {
+            let display_msg = if is_failed {
+                format!("󰅖 {}", msg)
+            } else if is_connecting {
                 let waves = match (anim_frame / 3) % 4 {
                     0 => "󰤟",
                     1 => "󰤢",
@@ -909,30 +923,53 @@ impl WifiPopover {
                 let short_ssid: String = net.ssid.chars().take(max_chars).collect();
                 renderer.draw_text(buffer, self.width, self.height, &short_ssid, 44, row_y + 17, 10.0, text_color);
 
-                // Security label
-                let sec_text = if net.security.is_empty() || net.security == "--" {
+                // Security label & Saved indicator
+                let sec_text = if net.is_saved {
+                    format!("Saved • 󰌾 {}", net.security)
+                } else if net.security.is_empty() || net.security == "--" {
                     "Open Network".to_string()
                 } else {
                     format!("󰌾 {}", net.security)
                 };
                 renderer.draw_text(buffer, self.width, self.height, &sec_text, 44, row_y + 29, 8.0, muted_text);
 
-                // Action badge
-                if net.in_use {
+                // Forget button [ 󰆴 ] for saved networks (x: 288..318)
+                if net.is_saved {
                     SoftwareRenderer::draw_rounded_rect(
                         buffer,
                         self.width,
                         self.height,
-                        226,
+                        288,
                         row_y + 6,
-                        90,
+                        30,
+                        22,
+                        4,
+                        block_bg,
+                        Some(border_subtle),
+                        1,
+                    );
+                    renderer.draw_text(buffer, self.width, self.height, "󰆴", 298, row_y + 20, 9.5, red_color);
+                }
+
+                // Action badge / Connect button
+                if net.in_use {
+                    let badge_w = if net.is_saved { 70 } else { 90 };
+                    let badge_x = if net.is_saved { 214 } else { 226 };
+                    SoftwareRenderer::draw_rounded_rect(
+                        buffer,
+                        self.width,
+                        self.height,
+                        badge_x,
+                        row_y + 6,
+                        badge_w,
                         22,
                         4,
                         accent_color,
                         None,
                         0,
                     );
-                    renderer.draw_text(buffer, self.width, self.height, "󰄬 Connected", 232, row_y + 20, 8.5, parse_hex_color("#11111b"));
+                    let label = if net.is_saved { "󰄬 Active" } else { "󰄬 Connected" };
+                    renderer.draw_text(buffer, self.width, self.height, label, badge_x + 6, row_y + 20, 8.5, parse_hex_color("#11111b"));
                 } else if is_connecting_this {
                     let dots = match (anim_frame / 3) % 4 {
                         0 => "Wait",
@@ -940,35 +977,39 @@ impl WifiPopover {
                         2 => "Wait..",
                         _ => "Wait...",
                     };
+                    let badge_w = if net.is_saved { 62 } else { 76 };
+                    let badge_x = if net.is_saved { 222 } else { 240 };
                     SoftwareRenderer::draw_rounded_rect(
                         buffer,
                         self.width,
                         self.height,
-                        240,
+                        badge_x,
                         row_y + 6,
-                        76,
+                        badge_w,
                         22,
                         4,
                         parse_hex_color("#313244"),
                         Some(accent_color),
                         1,
                     );
-                    renderer.draw_text(buffer, self.width, self.height, dots, 252, row_y + 20, 8.5, accent_color);
+                    renderer.draw_text(buffer, self.width, self.height, dots, badge_x + 12, row_y + 20, 8.5, accent_color);
                 } else {
+                    let btn_w = if net.is_saved { 62 } else { 68 };
+                    let btn_x = if net.is_saved { 222 } else { 248 };
                     SoftwareRenderer::draw_rounded_rect(
                         buffer,
                         self.width,
                         self.height,
-                        248,
+                        btn_x,
                         row_y + 6,
-                        68,
+                        btn_w,
                         22,
                         4,
                         block_bg,
                         Some(border_subtle),
                         1,
                     );
-                    renderer.draw_text(buffer, self.width, self.height, "Connect", 260, row_y + 20, 8.5, text_color);
+                    renderer.draw_text(buffer, self.width, self.height, "Connect", btn_x + 10, row_y + 20, 8.5, text_color);
                 }
             }
         }
@@ -1072,21 +1113,34 @@ mod tests {
 
     #[test]
     fn test_wifi_popover_clicks() {
-        let net = WifiNetworkItem {
+        let net1 = WifiNetworkItem {
             in_use: true,
             ssid: "HomeWiFi".into(),
             signal: 85,
             security: "WPA2".into(),
+            is_saved: true,
         };
-        let pop = WifiPopover::new(340, 350, true, "HomeWiFi".into(), 85, vec![net]);
+        let net2 = WifiNetworkItem {
+            in_use: false,
+            ssid: "CoffeeShop".into(),
+            signal: 60,
+            security: "WPA2".into(),
+            is_saved: false,
+        };
+        let pop = WifiPopover::new(340, 350, true, "HomeWiFi".into(), 85, vec![net1, net2]);
         // Close button click
         assert_eq!(pop.handle_click(310, 15), WifiPopoverAction::Close);
         // Rescan button
         assert_eq!(pop.handle_click(250, 15), WifiPopoverAction::Rescan);
         // Radio toggle
         assert_eq!(pop.handle_click(250, 50), WifiPopoverAction::ToggleRadio);
+        // Forget button click for saved network row 0 (x: 288..322, y: 94..128)
+        assert_eq!(pop.handle_click(300, 110), WifiPopoverAction::Forget("HomeWiFi".into()));
         // Connected item click -> Disconnect
         assert_eq!(pop.handle_click(50, 110), WifiPopoverAction::Disconnect("HomeWiFi".into()));
+        // Row 1 is not saved: clicking at x: 300 or x: 50 should trigger Connect, not Forget
+        assert_eq!(pop.handle_click(300, 140), WifiPopoverAction::Connect("CoffeeShop".into()));
+        assert_eq!(pop.handle_click(50, 140), WifiPopoverAction::Connect("CoffeeShop".into()));
         // Advanced nmtui button
         assert_eq!(pop.handle_click(50, 320), WifiPopoverAction::OpenNmtui);
     }
@@ -1102,6 +1156,7 @@ mod tests {
             ssid: "HomeWiFi".into(),
             signal: 85,
             security: "WPA2".into(),
+            is_saved: true,
         };
         let mut pop = WifiPopover::new(340, 350, true, "HomeWiFi".into(), 85, vec![net]);
         pop.is_scanning = true;
@@ -1110,6 +1165,10 @@ mod tests {
         // Render at frame 0 and frame 15 - ensures no panic with animation math
         pop.render(&mut renderer, &mut buffer, &config, 0);
         pop.render(&mut renderer, &mut buffer, &config, 15);
+
+        // Render with error banner (incorrect password feedback)
+        pop.status_message = Some("Incorrect password for HomeWiFi".into());
+        pop.render(&mut renderer, &mut buffer, &config, 20);
 
         let audio_pop = AudioPopover::new(320, 240, 60, false, false, "Test Sink".into());
         let mut audio_buf = vec![0u8; 320 * 240 * 4];

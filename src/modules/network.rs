@@ -44,6 +44,7 @@ pub struct NetworkModule {
     state: Arc<RwLock<NetState>>,
     cached_networks: Arc<RwLock<Vec<crate::modules::popup::WifiNetworkItem>>>,
     wifi_enabled: Arc<std::sync::atomic::AtomicBool>,
+    status_message: Arc<RwLock<Option<String>>>,
 }
 
 impl NetworkModule {
@@ -51,10 +52,12 @@ impl NetworkModule {
         let state = Arc::new(RwLock::new(NetState::default()));
         let cached_networks = Arc::new(RwLock::new(Self::query_wifi_networks_sync()));
         let wifi_enabled = Arc::new(std::sync::atomic::AtomicBool::new(Self::is_wifi_enabled_sync()));
+        let status_message = Arc::new(RwLock::new(None));
         let module = Self {
             state: state.clone(),
             cached_networks: cached_networks.clone(),
             wifi_enabled: wifi_enabled.clone(),
+            status_message: status_message.clone(),
         };
 
         module.spawn_monitor(state, cached_networks, wifi_enabled);
@@ -71,6 +74,29 @@ impl NetworkModule {
 
     pub fn get_wifi_enabled(&self) -> bool {
         self.wifi_enabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn get_status_message(&self) -> Option<String> {
+        self.status_message.try_read().ok().and_then(|m| m.clone())
+    }
+
+    pub fn take_status_message(&self) -> Option<String> {
+        if let Ok(mut lock) = self.status_message.try_write() {
+            lock.take()
+        } else {
+            None
+        }
+    }
+
+    pub fn set_status_message(&self, msg: Option<String>) {
+        if let Ok(mut lock) = self.status_message.try_write() {
+            *lock = msg;
+        }
+    }
+
+    pub async fn set_status_message_async(&self, msg: Option<String>) {
+        let mut lock = self.status_message.write().await;
+        *lock = msg;
     }
 
     pub async fn refresh_networks(&self) {
@@ -92,7 +118,59 @@ impl NetworkModule {
         self.refresh_networks().await;
     }
 
+    pub fn get_saved_connections_sync() -> std::collections::HashSet<String> {
+        let mut saved = std::collections::HashSet::new();
+        if let Ok(output) = std::process::Command::new("nmcli")
+            .args(["-t", "-f", "NAME,TYPE", "connection", "show"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split(':').collect();
+                    if parts.len() >= 2 {
+                        let name = parts[0].trim();
+                        let conn_type = parts[1].trim();
+                        if conn_type == "802-11-wireless" || conn_type == "wifi" {
+                            saved.insert(name.to_string());
+                        }
+                    } else if !line.trim().is_empty() {
+                        saved.insert(line.trim().to_string());
+                    }
+                }
+            }
+        }
+        saved
+    }
+
+    pub async fn get_saved_connections() -> std::collections::HashSet<String> {
+        let mut saved = std::collections::HashSet::new();
+        if let Ok(output) = tokio::process::Command::new("nmcli")
+            .args(["-t", "-f", "NAME,TYPE", "connection", "show"])
+            .output()
+            .await
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split(':').collect();
+                    if parts.len() >= 2 {
+                        let name = parts[0].trim();
+                        let conn_type = parts[1].trim();
+                        if conn_type == "802-11-wireless" || conn_type == "wifi" {
+                            saved.insert(name.to_string());
+                        }
+                    } else if !line.trim().is_empty() {
+                        saved.insert(line.trim().to_string());
+                    }
+                }
+            }
+        }
+        saved
+    }
+
     pub fn query_wifi_networks_sync() -> Vec<crate::modules::popup::WifiNetworkItem> {
+        let saved_connections = Self::get_saved_connections_sync();
         let mut list = Vec::new();
         if let Ok(output) = std::process::Command::new("nmcli")
             .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list", "--rescan", "auto"])
@@ -111,11 +189,13 @@ impl NetworkModule {
                     seen_ssids.insert(ssid.to_string());
                     let signal = parts[2].parse::<u32>().unwrap_or(0);
                     let security = parts[3].trim().to_string();
+                    let is_saved = saved_connections.contains(ssid);
                     list.push(crate::modules::popup::WifiNetworkItem {
                         in_use,
                         ssid: ssid.to_string(),
                         signal,
                         security,
+                        is_saved,
                     });
                 }
             }
@@ -136,6 +216,7 @@ impl NetworkModule {
     }
 
     pub async fn query_wifi_networks() -> Vec<crate::modules::popup::WifiNetworkItem> {
+        let saved_connections = Self::get_saved_connections().await;
         let mut list = Vec::new();
         let output = tokio::process::Command::new("nmcli")
             .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list", "--rescan", "auto"])
@@ -155,11 +236,13 @@ impl NetworkModule {
                     seen_ssids.insert(ssid.to_string());
                     let signal = parts[2].parse::<u32>().unwrap_or(0);
                     let security = parts[3].trim().to_string();
+                    let is_saved = saved_connections.contains(ssid);
                     list.push(crate::modules::popup::WifiNetworkItem {
                         in_use,
                         ssid: ssid.to_string(),
                         signal,
                         security,
+                        is_saved,
                     });
                 }
             }
@@ -208,17 +291,46 @@ impl NetworkModule {
         }
     }
 
-    pub fn is_connection_saved(ssid: &str) -> bool {
-        if let Ok(output) = std::process::Command::new("nmcli")
-            .args(["-t", "-f", "NAME", "connection", "show"])
+    pub async fn forget_wifi(ssid: &str) -> Result<(), String> {
+        let output = tokio::process::Command::new("nmcli")
+            .args(["connection", "delete", "id", ssid])
             .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                return stdout.lines().any(|line| line.trim() == ssid);
+            .await;
+        match output {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => {
+                let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                // Also attempt deleting by UUID in case name lookup had special characters or multiple profiles
+                if let Ok(list_out) = tokio::process::Command::new("nmcli")
+                    .args(["-t", "-f", "UUID,NAME", "connection", "show"])
+                    .output()
+                    .await
+                {
+                    let list_str = String::from_utf8_lossy(&list_out.stdout);
+                    let mut deleted_any = false;
+                    for line in list_str.lines() {
+                        let parts: Vec<&str> = line.split(':').collect();
+                        if parts.len() >= 2 && parts[1].trim() == ssid {
+                            let uuid = parts[0].trim();
+                            let _ = tokio::process::Command::new("nmcli")
+                                .args(["connection", "delete", "uuid", uuid])
+                                .output()
+                                .await;
+                            deleted_any = true;
+                        }
+                    }
+                    if deleted_any {
+                        return Ok(());
+                    }
+                }
+                Err(err)
             }
+            Err(e) => Err(e.to_string()),
         }
-        false
+    }
+
+    pub fn is_connection_saved(ssid: &str) -> bool {
+        Self::get_saved_connections_sync().contains(ssid)
     }
 
     pub async fn connect_wifi_with_password(ssid: &str, password: &str) -> Result<(), String> {
@@ -259,6 +371,22 @@ impl NetworkModule {
                 }
             }
         }
+
+        // Fallback to rofi if wofi is unavailable
+        let rofi_out = tokio::process::Command::new("rofi")
+            .args(["-dmenu", "-password", "-p", &prompt_text, "-lines", "0"])
+            .output()
+            .await;
+
+        if let Ok(out) = rofi_out {
+            if out.status.success() {
+                let pass = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !pass.is_empty() {
+                    return Some(pass);
+                }
+            }
+        }
+
         None
     }
 

@@ -684,34 +684,225 @@ impl BarState {
                                 let is_saved = NetworkModule::is_connection_saved(&s);
                                 let is_open = wifi.networks.iter().find(|n| n.ssid == s).map_or(false, |n| n.security.is_empty() || n.security == "--");
 
-                                if is_saved || is_open {
+                                if is_saved {
                                     wifi.status_message = Some(format!("Connecting to {}...", s));
+                                    wifi.status_timer = 0;
                                     tokio::spawn(async move {
-                                        let _ = NetworkModule::connect_wifi(&s).await;
-                                        tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+                                        mod_net.set_status_message_async(Some(format!("Connecting to {}...", s))).await;
+                                        match NetworkModule::connect_wifi(&s).await {
+                                            Ok(_) => {
+                                                mod_net.set_status_message_async(Some(format!("Connected to {}", s))).await;
+                                                let _ = tokio::process::Command::new("notify-send")
+                                                    .args([
+                                                        "-a",
+                                                        "hyprstatus",
+                                                        "-i",
+                                                        "network-wireless-symbolic",
+                                                        "Wi-Fi Connected",
+                                                        &format!("Connected to {}", s),
+                                                    ])
+                                                    .spawn();
+                                                tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+                                                mod_net.refresh_networks().await;
+                                            }
+                                            Err(_err) => {
+                                                // Password changed or authentication failure!
+                                                mod_net.set_status_message_async(Some(format!("Incorrect password for {}. Prompting...", s))).await;
+                                                let _ = tokio::process::Command::new("notify-send")
+                                                    .args([
+                                                        "-u",
+                                                        "critical",
+                                                        "-a",
+                                                        "hyprstatus",
+                                                        "Wi-Fi Authentication Failed",
+                                                        &format!("Connection to \"{}\" failed (password changed or invalid). Please enter the new password.", s),
+                                                    ])
+                                                    .spawn();
+
+                                                // Prompt for the new password
+                                                if let Some(new_password) = NetworkModule::prompt_wifi_password(&s).await {
+                                                    let new_password = new_password.trim().to_string();
+                                                    if !new_password.is_empty() {
+                                                        // Delete stale profile so NetworkManager doesn't conflict
+                                                        let _ = NetworkModule::forget_wifi(&s).await;
+                                                        mod_net.set_status_message_async(Some(format!("Connecting to {}...", s))).await;
+
+                                                        match NetworkModule::connect_wifi_with_password(&s, &new_password).await {
+                                                            Ok(_) => {
+                                                                mod_net.set_status_message_async(Some(format!("Connected to {}", s))).await;
+                                                                let _ = tokio::process::Command::new("notify-send")
+                                                                    .args([
+                                                                        "-a",
+                                                                        "hyprstatus",
+                                                                        "-i",
+                                                                        "network-wireless-symbolic",
+                                                                        "Wi-Fi Connected",
+                                                                        &format!("Connected to {} with updated password.", s),
+                                                                    ])
+                                                                    .spawn();
+                                                            }
+                                                            Err(second_err) => {
+                                                                mod_net.set_status_message_async(Some(format!("Incorrect password for {}", s))).await;
+                                                                let _ = tokio::process::Command::new("notify-send")
+                                                                    .args([
+                                                                        "-u",
+                                                                        "critical",
+                                                                        "-a",
+                                                                        "hyprstatus",
+                                                                        "Wi-Fi Connection Failed",
+                                                                        &format!("Incorrect password for \"{}\": {}", s, second_err),
+                                                                    ])
+                                                                    .spawn();
+                                                            }
+                                                        }
+                                                    } else {
+                                                        mod_net.set_status_message_async(Some(format!("Incorrect password for {}", s))).await;
+                                                    }
+                                                } else {
+                                                    // Cancelled prompt
+                                                    mod_net.set_status_message_async(Some(format!("Incorrect password for {}", s))).await;
+                                                }
+
+                                                tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+                                                mod_net.refresh_networks().await;
+                                            }
+                                        }
+                                    });
+                                } else if is_open {
+                                    wifi.status_message = Some(format!("Connecting to {}...", s));
+                                    wifi.status_timer = 0;
+                                    tokio::spawn(async move {
+                                        mod_net.set_status_message_async(Some(format!("Connecting to {}...", s))).await;
+                                        match NetworkModule::connect_wifi(&s).await {
+                                            Ok(_) => {
+                                                mod_net.set_status_message_async(Some(format!("Connected to {}", s))).await;
+                                                let _ = tokio::process::Command::new("notify-send")
+                                                    .args([
+                                                        "-a",
+                                                        "hyprstatus",
+                                                        "-i",
+                                                        "network-wireless-symbolic",
+                                                        "Wi-Fi Connected",
+                                                        &format!("Connected to {}", s),
+                                                    ])
+                                                    .spawn();
+                                            }
+                                            Err(err) => {
+                                                mod_net.set_status_message_async(Some(format!("Failed to connect to {}", s))).await;
+                                                let _ = tokio::process::Command::new("notify-send")
+                                                    .args([
+                                                        "-u",
+                                                        "critical",
+                                                        "-a",
+                                                        "hyprstatus",
+                                                        "Wi-Fi Connection Failed",
+                                                        &format!("Failed to connect to open network \"{}\": {}", s, err),
+                                                    ])
+                                                    .spawn();
+                                            }
+                                        }
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
                                         mod_net.refresh_networks().await;
                                     });
                                 } else {
                                     wifi.status_message = Some(format!("Prompting password for {}...", s));
+                                    wifi.status_timer = 0;
                                     tokio::spawn(async move {
+                                        mod_net.set_status_message_async(Some(format!("Prompting password for {}...", s))).await;
                                         if let Some(password) = NetworkModule::prompt_wifi_password(&s).await {
+                                            let password = password.trim().to_string();
                                             if !password.is_empty() {
-                                                let _ = NetworkModule::connect_wifi_with_password(&s, &password).await;
-                                                tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
-                                                mod_net.refresh_networks().await;
+                                                mod_net.set_status_message_async(Some(format!("Connecting to {}...", s))).await;
+                                                match NetworkModule::connect_wifi_with_password(&s, &password).await {
+                                                    Ok(_) => {
+                                                        mod_net.set_status_message_async(Some(format!("Connected to {}", s))).await;
+                                                        let _ = tokio::process::Command::new("notify-send")
+                                                            .args([
+                                                                "-a",
+                                                                "hyprstatus",
+                                                                "-i",
+                                                                "network-wireless-symbolic",
+                                                                "Wi-Fi Connected",
+                                                                &format!("Connected to {}", s),
+                                                            ])
+                                                            .spawn();
+                                                    }
+                                                    Err(err) => {
+                                                        mod_net.set_status_message_async(Some(format!("Incorrect password for {}", s))).await;
+                                                        let _ = tokio::process::Command::new("notify-send")
+                                                            .args([
+                                                                "-u",
+                                                                "critical",
+                                                                "-a",
+                                                                "hyprstatus",
+                                                                "Wi-Fi Authentication Failed",
+                                                                &format!("Incorrect password for \"{}\": {}", s, err),
+                                                            ])
+                                                            .spawn();
+                                                    }
+                                                }
+                                            } else {
+                                                mod_net.set_status_message_async(None).await;
                                             }
+                                        } else {
+                                            mod_net.set_status_message_async(None).await;
                                         }
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+                                        mod_net.refresh_networks().await;
                                     });
                                 }
                                 rerender_popover = Some(reg_id);
                             }
                             WifiPopoverAction::Disconnect(ssid) => {
                                 wifi.status_message = Some(format!("Disconnecting from {}...", ssid));
+                                wifi.status_timer = 0;
                                 let s = ssid.clone();
                                 let mod_net = self.mod_network.clone();
                                 tokio::spawn(async move {
+                                    mod_net.set_status_message_async(Some(format!("Disconnecting from {}...", s))).await;
                                     NetworkModule::disconnect_wifi(&s).await;
+                                    mod_net.set_status_message_async(Some(format!("Disconnected from {}", s))).await;
                                     tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+                                    mod_net.refresh_networks().await;
+                                });
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::Forget(ssid) => {
+                                let s = ssid.clone();
+                                let mod_net = self.mod_network.clone();
+                                wifi.status_message = Some(format!("Forgetting \"{}\"...", s));
+                                wifi.status_timer = 0;
+                                tokio::spawn(async move {
+                                    mod_net.set_status_message_async(Some(format!("Forgetting \"{}\"...", s))).await;
+                                    match NetworkModule::forget_wifi(&s).await {
+                                        Ok(_) => {
+                                            mod_net.set_status_message_async(Some(format!("Forgot \"{}\"", s))).await;
+                                            let _ = tokio::process::Command::new("notify-send")
+                                                .args([
+                                                    "-a",
+                                                    "hyprstatus",
+                                                    "-i",
+                                                    "network-wireless-symbolic",
+                                                    "Wi-Fi Network Forgotten",
+                                                    &format!("Saved connection for \"{}\" removed.", s),
+                                                ])
+                                                .spawn();
+                                        }
+                                        Err(e) => {
+                                            mod_net.set_status_message_async(Some(format!("Error: {}", e))).await;
+                                            let _ = tokio::process::Command::new("notify-send")
+                                                .args([
+                                                    "-u",
+                                                    "critical",
+                                                    "-a",
+                                                    "hyprstatus",
+                                                    "Failed to Forget Network",
+                                                    &format!("Could not remove \"{}\": {}", s, e),
+                                                ])
+                                                .spawn();
+                                        }
+                                    }
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
                                     mod_net.refresh_networks().await;
                                 });
                                 rerender_popover = Some(reg_id);
@@ -1404,6 +1595,19 @@ impl BarState {
                     }
                     wifi.networks = cached;
 
+                    if let Some(msg) = self.mod_network.take_status_message() {
+                        let is_transient = msg.contains("Connecting") || msg.contains("Scanning") || msg.contains("Prompting");
+                        wifi.status_message = Some(msg);
+                        wifi.status_timer = if is_transient { 0 } else { 90 };
+                    }
+
+                    if wifi.status_timer > 0 {
+                        wifi.status_timer -= 1;
+                        if wifi.status_timer == 0 {
+                            wifi.status_message = None;
+                        }
+                    }
+
                     // Periodic active refresh every ~2.5s (35 frames) while popover is open
                     if bar.popover.anim_frame % 35 == 0 && enabled && !wifi.is_scanning {
                         let mod_net = self.mod_network.clone();
@@ -1425,6 +1629,7 @@ impl BarState {
                             let target = msg.trim_start_matches("Connecting to ").trim_end_matches("...");
                             if !wifi.active_ssid.is_empty() && wifi.active_ssid == target {
                                 wifi.status_message = Some(format!("Connected to {}", target));
+                                wifi.status_timer = 90;
                             }
                         }
                     }
