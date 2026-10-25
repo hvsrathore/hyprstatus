@@ -9,6 +9,7 @@ use crate::modules::popup::{
     AudioPopover, AudioPopoverAction, BarPopover, PopoverKind, WifiPopover, WifiPopoverAction,
     WorkspacePopup,
 };
+use crate::modules::screenshot::ScreenshotModule;
 use crate::modules::tray::TrayModule;
 use crate::modules::window_title::WindowTitleModule;
 use crate::modules::workspace::WorkspaceModule;
@@ -115,6 +116,7 @@ pub struct BarState {
     pub mod_perf: PerfModule,
     pub mod_clock: ClockModule,
     pub mod_tray: TrayModule,
+    pub mod_screenshot: ScreenshotModule,
 
     // Pointer tracking
     pub pointer_surface: Option<wl_surface::WlSurface>,
@@ -135,6 +137,7 @@ impl BarState {
         mod_perf: PerfModule,
         mod_clock: ClockModule,
         mod_tray: TrayModule,
+        mod_screenshot: ScreenshotModule,
     ) -> Self {
         let renderer = SoftwareRenderer::new(&config.bar.font_path);
         Self {
@@ -155,6 +158,7 @@ impl BarState {
             mod_perf,
             mod_clock,
             mod_tray,
+            mod_screenshot,
             pointer_surface: None,
             pointer_x: 0.0,
             pointer_y: 0.0,
@@ -259,6 +263,7 @@ impl BarState {
             "perf" => Some(self.mod_perf.render(&self.config)),
             "clock" => Some(self.mod_clock.render(&self.config)),
             "tray" => Some(self.mod_tray.render(&self.config)),
+            "screenshot" => Some(self.mod_screenshot.render(&self.config, output_name)),
             _ => None,
         }
     }
@@ -674,14 +679,30 @@ impl BarState {
                                 rerender_popover = Some(reg_id);
                             }
                             WifiPopoverAction::Connect(ssid) => {
-                                wifi.status_message = Some(format!("Connecting to {}...", ssid));
                                 let s = ssid.clone();
                                 let mod_net = self.mod_network.clone();
-                                tokio::spawn(async move {
-                                    let _ = NetworkModule::connect_wifi(&s).await;
-                                    tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
-                                    mod_net.refresh_networks().await;
-                                });
+                                let is_saved = NetworkModule::is_connection_saved(&s);
+                                let is_open = wifi.networks.iter().find(|n| n.ssid == s).map_or(false, |n| n.security.is_empty() || n.security == "--");
+
+                                if is_saved || is_open {
+                                    wifi.status_message = Some(format!("Connecting to {}...", s));
+                                    tokio::spawn(async move {
+                                        let _ = NetworkModule::connect_wifi(&s).await;
+                                        tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+                                        mod_net.refresh_networks().await;
+                                    });
+                                } else {
+                                    wifi.status_message = Some(format!("Prompting password for {}...", s));
+                                    tokio::spawn(async move {
+                                        if let Some(password) = NetworkModule::prompt_wifi_password(&s).await {
+                                            if !password.is_empty() {
+                                                let _ = NetworkModule::connect_wifi_with_password(&s, &password).await;
+                                                tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+                                                mod_net.refresh_networks().await;
+                                            }
+                                        }
+                                    });
+                                }
                                 rerender_popover = Some(reg_id);
                             }
                             WifiPopoverAction::Disconnect(ssid) => {
@@ -698,10 +719,17 @@ impl BarState {
                             WifiPopoverAction::OpenNmtui => {
                                 hide_reg_id = Some(reg_id);
                                 tokio::spawn(async move {
-                                    let _ = tokio::process::Command::new("alacritty")
-                                        .arg("-e")
-                                        .arg("nmtui")
-                                        .spawn();
+                                    let terminals = ["kitty", "alacritty", "foot", "wezterm", "gnome-terminal"];
+                                    for term in terminals {
+                                        if let Ok(mut child) = tokio::process::Command::new(term)
+                                            .arg("-e")
+                                            .arg("nmtui")
+                                            .spawn()
+                                        {
+                                            let _ = child.wait().await;
+                                            break;
+                                        }
+                                    }
                                 });
                             }
                             WifiPopoverAction::None => {}
@@ -891,6 +919,37 @@ impl BarState {
                         let _ = tokio::process::Command::new("notify-send")
                             .args(["-a", "hyprstatus", "Calendar", "Calendar notification"])
                             .spawn();
+                    });
+                }
+                ClickAction::ScreenshotClick(out_name) => {
+                    // Close any dropdown popovers so they don't block the screen,
+                    // but the status bar itself remains completely visible on top.
+                    self.hide_all_popovers();
+                    self.mod_screenshot.trigger_flash();
+
+                    // Re-render bars immediately to display visual flash feedback
+                    let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+                    for id in reg_ids {
+                        self.render_bar(qh, id);
+                    }
+
+                    let config = self.config.clone();
+                    let all_monitors = match button {
+                        MouseButton::Right => false, // Right-click captures just this output
+                        _ => config.modules.screenshot.all_monitors, // Left-click captures entire desktop screen
+                    };
+
+                    tokio::spawn(async move {
+                        // Brief pause to allow compositor to flush any closed popovers
+                        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                        match ScreenshotModule::capture(&config, Some(&out_name), all_monitors).await {
+                            Ok(path) => {
+                                println!("[screenshot] Screen captured successfully to {}", path.display());
+                            }
+                            Err(e) => {
+                                eprintln!("[screenshot] Error capturing screenshot: {}", e);
+                            }
+                        }
                     });
                 }
                 ClickAction::TrayActivate(service) => {
@@ -1291,9 +1350,18 @@ impl BarState {
 
     pub fn has_visible_popover(&self) -> bool {
         self.bars.values().any(|b| b.popover.visible)
+            || self.mod_screenshot.is_flashing()
+            || self.mod_screenshot.needs_reset()
     }
 
     pub fn anim_tick(&mut self, qh: &QueueHandle<Self>) {
+        if self.mod_screenshot.is_flashing() || self.mod_screenshot.take_reset() {
+            let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+            for id in reg_ids {
+                self.render_bar(qh, id);
+            }
+        }
+
         let mut needs_redraw = Vec::new();
 
         for (&reg_id, bar) in self.bars.iter_mut() {

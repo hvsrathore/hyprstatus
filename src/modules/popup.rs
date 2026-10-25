@@ -48,9 +48,17 @@ impl WorkspacePopup {
         self.visible = true;
         self.thumbnails.clear();
 
-        let pad_x = 8i32;
-        let pad_top = 24i32; // space for header
-        let pad_bot = 8i32;
+        let filtered: Vec<&HyprClient> = clients.iter().filter(|c| c.workspace.id == ws_id).collect();
+        if filtered.is_empty() {
+            return;
+        }
+
+        let min_x = filtered.iter().map(|c| c.at.0).min().unwrap_or(0);
+        let min_y = filtered.iter().map(|c| c.at.1).min().unwrap_or(0);
+
+        let pad_x = 12i32;
+        let pad_top = 30i32;
+        let pad_bot = 40i32;
 
         let inner_w = (self.width as i32 - pad_x * 2).max(10) as f32;
         let inner_h = (self.height as i32 - pad_top - pad_bot).max(10) as f32;
@@ -61,19 +69,14 @@ impl WorkspacePopup {
         let scale_x = inner_w / mon_w_f;
         let scale_y = inner_h / mon_h_f;
 
-        for c in clients {
-            if c.workspace.id != ws_id {
-                continue;
-            }
-
-            // Normalise coordinate within the monitor bounds
-            let rx = (c.at.0 % mon_w as i32).max(0) as f32;
-            let ry = (c.at.1 % mon_h as i32).max(0) as f32;
+        for c in &filtered {
+            let rx = (c.at.0 - min_x).max(0) as f32;
+            let ry = (c.at.1 - min_y).max(0) as f32;
 
             let x = pad_x + (rx * scale_x) as i32;
             let y = pad_top + (ry * scale_y) as i32;
-            let w = ((c.size.0 as f32 * scale_x).round() as u32).max(24).min(self.width - pad_x as u32 * 2);
-            let h = ((c.size.1 as f32 * scale_y).round() as u32).max(18).min(self.height - pad_top as u32 - pad_bot as u32);
+            let w = ((c.size.0 as f32 * scale_x).round() as u32).max(30).min(self.width - pad_x as u32 * 2);
+            let h = ((c.size.1 as f32 * scale_y).round() as u32).max(22).min(inner_h as u32);
 
             self.thumbnails.push(ThumbnailRect {
                 address: c.address.clone(),
@@ -116,6 +119,8 @@ impl WorkspacePopup {
         let thumb_bg = parse_hex_color(&config.colors.block_background);
         let thumb_border = parse_hex_color(&config.colors.border);
         let text_fg = parse_hex_color(&config.colors.foreground);
+        let accent_color = parse_hex_color(&config.colors.active_workspace_bg);
+        let muted_text = parse_hex_color("#a6adc8");
 
         // Draw popup background with border
         SoftwareRenderer::draw_rounded_rect(
@@ -126,38 +131,57 @@ impl WorkspacePopup {
             0,
             self.width,
             self.height,
-            6,
+            8,
             bg_color,
             Some(border_color),
             2,
         );
 
-        // Draw header title
-        let title = format!("Workspace {} Preview", self.workspace_id);
+        // Header: "󰍹 Workspace {id}"
+        let title = format!("󰍹 Workspace {}", self.workspace_id);
         renderer.draw_text(
             buffer,
             self.width,
             self.height,
             &title,
             12,
-            16,
-            11.0,
-            header_fg,
+            20,
+            11.5,
+            accent_color,
         );
 
-        // Draw miniature window wireframes
+        // Badge on right of header: window count
+        let count_str = if self.thumbnails.is_empty() {
+            "Empty".to_string()
+        } else if self.thumbnails.len() == 1 {
+            "1 Window".to_string()
+        } else {
+            format!("{} Windows", self.thumbnails.len())
+        };
+        renderer.draw_text(
+            buffer,
+            self.width,
+            self.height,
+            &count_str,
+            (self.width - 70) as i32,
+            20,
+            9.0,
+            muted_text,
+        );
+
         if self.thumbnails.is_empty() {
             renderer.draw_text(
                 buffer,
                 self.width,
                 self.height,
                 "No open windows",
-                self.width as i32 / 2 - 40,
+                self.width as i32 / 2 - 45,
                 self.height as i32 / 2 + 5,
                 11.0,
                 thumb_border,
             );
         } else {
+            // Draw miniature window wireframes
             for thumb in &self.thumbnails {
                 SoftwareRenderer::draw_rounded_rect(
                     buffer,
@@ -167,20 +191,22 @@ impl WorkspacePopup {
                     thumb.y,
                     thumb.width,
                     thumb.height,
-                    3,
+                    4,
                     thumb_bg,
-                    Some(thumb_border),
+                    Some(accent_color),
                     1,
                 );
 
-                let label = if !thumb.class.is_empty() {
-                    &thumb.class
-                } else if !thumb.title.is_empty() {
-                    &thumb.title
-                } else {
-                    "window"
+                let icon = match thumb.class.to_lowercase().as_str() {
+                    c if c.contains("chrome") || c.contains("chromium") || c.contains("browser") => "󰊯",
+                    c if c.contains("firefox") => "󰈹",
+                    c if c.contains("kitty") || c.contains("terminal") || c.contains("alacritty") => "󰞷",
+                    c if c.contains("code") || c.contains("nvim") || c.contains("vim") => "󰨞",
+                    c if c.contains("thunar") || c.contains("nautilus") || c.contains("file") => "󰘑",
+                    _ => "󰖲",
                 };
 
+                let label = format!("{} {}", icon, if !thumb.class.is_empty() { &thumb.class } else { "app" });
                 let max_chars = (thumb.width / 7).max(1) as usize;
                 let short_label: String = label.chars().take(max_chars).collect();
 
@@ -189,10 +215,48 @@ impl WorkspacePopup {
                     self.width,
                     self.height,
                     &short_label,
-                    thumb.x + 4,
+                    thumb.x + 6,
                     thumb.y + thumb.height as i32 / 2 + 4,
                     9.0,
                     text_fg,
+                );
+            }
+
+            // Bottom title banner: shows window title clearly
+            let banner_y = (self.height as i32 - 32).max(28);
+            SoftwareRenderer::draw_rounded_rect(
+                buffer,
+                self.width,
+                self.height,
+                12,
+                banner_y,
+                self.width - 24,
+                24,
+                4,
+                parse_hex_color("#1e1e2e"),
+                Some(thumb_border),
+                1,
+            );
+
+            if let Some(first) = self.thumbnails.first() {
+                let display_title = if !first.title.is_empty() {
+                    &first.title
+                } else if !first.class.is_empty() {
+                    &first.class
+                } else {
+                    "Untitled Window"
+                };
+                let max_chars = ((self.width - 40) / 7) as usize;
+                let short_title: String = display_title.chars().take(max_chars).collect();
+                renderer.draw_text(
+                    buffer,
+                    self.width,
+                    self.height,
+                    &short_title,
+                    20,
+                    banner_y + 16,
+                    8.5,
+                    header_fg,
                 );
             }
         }

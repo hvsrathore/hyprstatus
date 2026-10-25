@@ -12,6 +12,7 @@ use modules::battery::BatteryModule;
 use modules::clock::ClockModule;
 use modules::network::NetworkModule;
 use modules::perf::PerfModule;
+use modules::screenshot::ScreenshotModule;
 use modules::tray::TrayModule;
 use modules::window_title::WindowTitleModule;
 use modules::workspace::WorkspaceModule;
@@ -61,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mod_perf = PerfModule::new();
     let mod_clock = ClockModule::new();
     let mod_tray = TrayModule::new();
+    let mod_screenshot = ScreenshotModule::new();
 
     // 5. Connect to Wayland compositor
     let conn = match Connection::connect_to_env() {
@@ -87,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         mod_perf,
         mod_clock,
         mod_tray,
+        mod_screenshot,
     );
 
     // Get display registry and discover globals

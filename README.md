@@ -13,7 +13,8 @@ A blazing-fast, zero-bloat, i3-style status bar daemon designed specifically for
 - **Dynamic Multi-Monitor & Hot-Plugging**: Automatically tracks `wl_output` additions and removals, maintaining independent rendering loops and per-output configuration overrides (e.g. `[output.HDMI-A-1]`).
 - **Interactive Workspace Thumbnails**: Hovering over workspace pills reveals miniature floating wireframe application previews; clicking any preview thumbnail immediately dispatches focus to that window via Hyprland IPC. Full support for modern Hyprland Lua (`hl.dsp.focus`) dispatching and legacy IPC.
 - **Real-Time PipeWire Audio & Sound Popover**: Built-in native PipeWire client thread monitoring default sink/source node states, volume levels, mute toggles, and microphone activity. Clicking the audio block opens a sleek native Quick Settings popover menu featuring an interactive volume slider, step controls (`-5%` / `+5%`), preset buttons (`25%`, `50%`, `75%`, `100%`), master mute toggle, and microphone input control.
-- **Netlink Network & Wi-Fi Popover**: Asynchronous netlink interface monitoring and real-time throughput calculations. Displays dynamic signal strength icons (`󰤨`, `󰤥`, `󰤢`, `󰤟`, `󰤮`), active SSID, and connection type. Clicking opens a matching native Quick Settings popover menu displaying Wi-Fi radio on/off toggle, network rescan, available networks list with signal bars, and one-click connect/disconnect.
+- **Netlink Network & Wi-Fi Popover**: Asynchronous netlink interface monitoring and real-time throughput calculations. Displays dynamic signal strength icons (`󰤨`, `󰤥`, `󰤢`, `󰤟`, `󰤮`), active SSID, and connection type. Clicking opens a matching native Quick Settings popover menu displaying Wi-Fi radio on/off toggle, network rescan, available networks list with signal bars, one-click connect/disconnect, and native password dialogs for secured networks via `wofi`.
+- **One-Click Full-Screen Screenshot Button**: Dedicated status bar camera button (``) that captures the entire screen including the status bar itself using `grim`, copies the image directly to the Wayland clipboard (`wl-copy`), saves to `~/Pictures/Screenshots/`, and delivers a desktop notification with the screenshot thumbnail preview. Left click captures all monitors, right click captures the active monitor, with visual shutter flash feedback on the bar.
 - **Sysfs Battery & Power Management**: Direct sysfs metrics parsing (`/sys/class/power_supply/BAT*/*` and `AC`) for charging status, percentage, wattage, and time estimates, with automated desktop notifications below 15%.
 - **Braille Performance Sparklines**: Samples `/proc/stat` and `/proc/meminfo` into rolling ring buffers, rasterizing smooth inline Unicode Braille performance graphs (e.g., `⣀⣤⣾⣿`) for CPU utilization and RAM usage without external processes.
 - **StatusNotifierItem (SNI) System Tray**: Implements the FreeDesktop `org.kde.StatusNotifierWatcher` and `org.kde.StatusNotifierItem` DBus interfaces via `zbus`, allowing background applications (Nextcloud, Discord, Steam, etc.) to register clickable tray icons with custom pixmaps.
@@ -107,11 +108,12 @@ network = "#74c7ec"
 battery_good = "#a6e3a1"
 battery_warning = "#fab387"
 battery_critical = "#f38ba8"
+screenshot = "#fab387"
 
 [layout]
 left = ["workspaces", "window_title"]
 center = ["perf"]
-right = ["tray", "network", "audio", "battery", "clock"]
+right = ["tray", "screenshot", "network", "audio", "battery", "clock"]
 
 [modules.audio]
 step_percent = 5
@@ -135,6 +137,14 @@ click_command = "btop"
 width = 260
 height = 160
 enabled = true
+
+[modules.screenshot]
+icon = ""
+label = ""
+save_directory = "~/Pictures/Screenshots"
+copy_to_clipboard = true
+notify = true
+all_monitors = true
 
 # Optional Per-Monitor Overrides:
 [output.HDMI-A-1]
@@ -164,6 +174,8 @@ right = ["tray", "network", "audio", "battery", "clock"]
 | **Network Block** | Right Click | Launches `nmtui` in terminal |
 | **Wi-Fi Popover** | Network Row Click | Connects to network or disconnects active Wi-Fi |
 | **Wi-Fi Popover** | Toggle / Scan Buttons | Toggles Wi-Fi radio ON/OFF or triggers scan |
+| **Screenshot Button** | Left Click | Captures entire screen (all monitors including status bar), copies to clipboard, and notifies |
+| **Screenshot Button** | Right Click | Captures current monitor (including status bar), copies to clipboard, and notifies |
 | **Perf Block** | Left Click | Launches `btop` / `htop` system monitor |
 | **Tray Icon** | Left Click | Forwards `Activate` DBus method to application |
 | **Tray Icon** | Right Click | Forwards `ContextMenu` DBus method to application |

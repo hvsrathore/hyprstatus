@@ -208,6 +208,60 @@ impl NetworkModule {
         }
     }
 
+    pub fn is_connection_saved(ssid: &str) -> bool {
+        if let Ok(output) = std::process::Command::new("nmcli")
+            .args(["-t", "-f", "NAME", "connection", "show"])
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return stdout.lines().any(|line| line.trim() == ssid);
+            }
+        }
+        false
+    }
+
+    pub async fn connect_wifi_with_password(ssid: &str, password: &str) -> Result<(), String> {
+        let output = tokio::process::Command::new("nmcli")
+            .args(["dev", "wifi", "connect", ssid, "password", password])
+            .output()
+            .await;
+        match output {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub async fn prompt_wifi_password(ssid: &str) -> Option<String> {
+        let prompt_text = format!("Password for {}:", ssid);
+        let output = tokio::process::Command::new("wofi")
+            .args([
+                "--dmenu",
+                "--password",
+                "--prompt",
+                &prompt_text,
+                "--lines",
+                "0",
+                "--width",
+                "360",
+                "--height",
+                "60",
+            ])
+            .output()
+            .await;
+
+        if let Ok(out) = output {
+            if out.status.success() {
+                let pass = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !pass.is_empty() {
+                    return Some(pass);
+                }
+            }
+        }
+        None
+    }
+
     pub async fn disconnect_wifi(ssid: &str) {
         let _ = tokio::process::Command::new("nmcli")
             .args(["connection", "down", "id", ssid])

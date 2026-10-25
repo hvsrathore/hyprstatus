@@ -5,6 +5,7 @@ pub mod clock;
 pub mod network;
 pub mod perf;
 pub mod popup;
+pub mod screenshot;
 pub mod tray;
 pub mod window_title;
 pub mod workspace;
@@ -48,6 +49,7 @@ pub enum ClickAction {
     NetworkClick,
     PerfClick,
     ClockClick,
+    ScreenshotClick(String),
     TrayActivate(String),
     TrayContextMenu(String),
     Command(String),

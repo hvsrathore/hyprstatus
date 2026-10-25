@@ -135,6 +135,8 @@ pub struct ColorTheme {
     pub battery_warning: String,
     #[serde(default = "default_battery_critical")]
     pub battery_critical: String,
+    #[serde(default = "default_screenshot_color")]
+    pub screenshot: String,
 }
 
 impl Default for ColorTheme {
@@ -158,6 +160,7 @@ impl Default for ColorTheme {
             battery_good: default_battery_good(),
             battery_warning: default_battery_warning(),
             battery_critical: default_battery_critical(),
+            screenshot: default_screenshot_color(),
         }
     }
 }
@@ -180,6 +183,7 @@ fn default_network_color() -> String { "#74c7ec".to_string() } // Sapphire
 fn default_battery_good() -> String { "#a6e3a1".to_string() }
 fn default_battery_warning() -> String { "#fab387".to_string() } // Peach
 fn default_battery_critical() -> String { "#f38ba8".to_string() }
+fn default_screenshot_color() -> String { "#fab387".to_string() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LayoutConfig {
@@ -212,6 +216,7 @@ fn default_center_modules() -> Vec<String> {
 fn default_right_modules() -> Vec<String> {
     vec![
         "tray".to_string(),
+        "screenshot".to_string(),
         "network".to_string(),
         "audio".to_string(),
         "battery".to_string(),
@@ -259,6 +264,8 @@ pub struct ModulesConfig {
     pub clock: ClockConfig,
     #[serde(default)]
     pub popup: PopupConfig,
+    #[serde(default)]
+    pub screenshot: ScreenshotConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +402,42 @@ impl Default for PopupConfig {
 
 fn default_popup_width() -> u32 { 260 }
 fn default_popup_height() -> u32 { 160 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScreenshotConfig {
+    #[serde(default = "default_screenshot_icon")]
+    pub icon: String,
+    #[serde(default = "default_screenshot_label")]
+    pub label: String,
+    #[serde(default = "default_screenshot_directory")]
+    pub save_directory: String,
+    #[serde(default = "default_screenshot_copy_clipboard")]
+    pub copy_to_clipboard: bool,
+    #[serde(default = "default_screenshot_notify")]
+    pub notify: bool,
+    #[serde(default = "default_screenshot_all_monitors")]
+    pub all_monitors: bool,
+}
+
+impl Default for ScreenshotConfig {
+    fn default() -> Self {
+        Self {
+            icon: default_screenshot_icon(),
+            label: default_screenshot_label(),
+            save_directory: default_screenshot_directory(),
+            copy_to_clipboard: default_screenshot_copy_clipboard(),
+            notify: default_screenshot_notify(),
+            all_monitors: default_screenshot_all_monitors(),
+        }
+    }
+}
+
+fn default_screenshot_icon() -> String { "".to_string() }
+fn default_screenshot_label() -> String { "".to_string() }
+fn default_screenshot_directory() -> String { "~/Pictures/Screenshots".to_string() }
+fn default_screenshot_copy_clipboard() -> bool { true }
+fn default_screenshot_notify() -> bool { true }
+fn default_screenshot_all_monitors() -> bool { true }
 
 impl Default for Config {
     fn default() -> Self {
