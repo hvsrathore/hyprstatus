@@ -562,10 +562,11 @@ impl BarState {
             }
         }
 
-        // Find which bar contains this coordinate
+        // Find which bar contains this coordinate (matching the surface pointer is over)
         for bar in self.bars.values() {
-            for cr in &bar.click_regions {
-                if x >= cr.x && x < cr.x + cr.width as i32 && y >= cr.y && y < cr.y + cr.height as i32 {
+            if Some(&bar.surface) == self.pointer_surface.as_ref() {
+                for cr in &bar.click_regions {
+                    if x >= cr.x && x < cr.x + cr.width as i32 && y >= cr.y && y < cr.y + cr.height as i32 {
                     match &cr.action {
                         ClickAction::SwitchWorkspace(id) => {
                             let ws_id = *id;
@@ -656,6 +657,7 @@ impl BarState {
                         }
                         _ => {}
                     }
+                    }
                 }
             }
         }
@@ -665,19 +667,22 @@ impl BarState {
         self.pointer_x = x;
         self.pointer_y = y;
 
-        // Check if cursor hovers over any workspace pill
+        // Check if cursor hovers over any workspace pill on the active bar
         let xi = x as i32;
         let yi = y as i32;
 
         let mut hovered: Option<(u32, i32, i32, u32)> = None;
         for (reg_id, bar) in &self.bars {
-            for cr in &bar.click_regions {
-                if let ClickAction::HoverWorkspace(ws_id, px, pw) = &cr.action {
-                    if xi >= *px && xi < *px + *pw && yi >= cr.y && yi < cr.y + cr.height as i32 {
-                        hovered = Some((*reg_id, *ws_id, *px, *pw as u32));
-                        break;
+            if Some(&bar.surface) == self.pointer_surface.as_ref() {
+                for cr in &bar.click_regions {
+                    if let ClickAction::HoverWorkspace(ws_id, px, pw) = &cr.action {
+                        if xi >= *px && xi < *px + *pw && yi >= cr.y && yi < cr.y + cr.height as i32 {
+                            hovered = Some((*reg_id, *ws_id, *px, *pw as u32));
+                            break;
+                        }
                     }
                 }
+                break;
             }
         }
 
@@ -702,6 +707,20 @@ impl BarState {
 
         bar.popup.update_clients(ws_id, anchor_x, &clients, bar.width, bar.height);
 
+        let (anchor, margin_top, margin_bottom) = if self.config.bar.position == "bottom" {
+            (
+                zwlr_layer_surface_v1::Anchor::Bottom | zwlr_layer_surface_v1::Anchor::Left,
+                0,
+                bar.height as i32 + 6,
+            )
+        } else {
+            (
+                zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left,
+                bar.height as i32 + 6,
+                0,
+            )
+        };
+
         // If popup surface doesn't exist, create it via layer_shell
         if bar.popup_surface.is_none() {
             let compositor = match &self.compositor {
@@ -723,37 +742,43 @@ impl BarState {
                 reg_id + 1000,
             );
 
-            layer_surface.set_anchor(zwlr_layer_surface_v1::Anchor::Top | zwlr_layer_surface_v1::Anchor::Left);
+            layer_surface.set_anchor(anchor);
             layer_surface.set_size(bar.popup.width, bar.popup.height);
-            layer_surface.set_margin(bar.height as i32 + 6, 0, 0, anchor_x);
+            layer_surface.set_margin(margin_top, 0, margin_bottom, anchor_x);
             layer_surface.set_exclusive_zone(-1);
 
+            // Initial commit without buffer attached (required by layer shell protocol)
             surface.commit();
 
             bar.popup_surface = Some(surface);
             bar.popup_layer_surface = Some(layer_surface);
+            bar.popup_configured = false;
         } else {
-            // Update popup surface margin to align below hovered pill
+            // Popup surface already exists, update position margin
             if let Some(ls) = &bar.popup_layer_surface {
-                ls.set_margin(bar.height as i32 + 6, 0, 0, anchor_x);
+                ls.set_margin(margin_top, 0, margin_bottom, anchor_x);
             }
-            if let Some(s) = &bar.popup_surface {
-                s.commit();
+            if bar.popup_configured {
+                self.render_popup(qh, reg_id);
             }
-            self.render_popup(qh, reg_id);
         }
     }
 
     pub fn hide_workspace_popup(&mut self) {
         for bar in self.bars.values_mut() {
-            if bar.popup.visible {
+            if bar.popup.visible || bar.popup_surface.is_some() {
                 bar.popup.visible = false;
-                if let Some(s) = &bar.popup_surface {
-                    s.attach(None, 0, 0);
-                    s.commit();
+                bar.popup_configured = false;
+                if let Some(ls) = bar.popup_layer_surface.take() {
+                    ls.destroy();
                 }
+                if let Some(s) = bar.popup_surface.take() {
+                    s.destroy();
+                }
+                bar.popup_buffer = None;
             }
         }
+        self.hovered_ws_pill = None;
     }
 
     pub fn render_popup(&mut self, qh: &QueueHandle<Self>, reg_id: u32) {
@@ -767,7 +792,7 @@ impl BarState {
             None => return,
         };
 
-        if !bar.popup.visible || bar.popup_surface.is_none() {
+        if !bar.popup_configured || !bar.popup.visible || bar.popup_surface.is_none() {
             return;
         }
 
@@ -844,12 +869,15 @@ impl Dispatch<wl_registry::WlRegistry, ()> for BarState {
             },
             wl_registry::Event::GlobalRemove { name } => {
                 println!("[layer_shell] Display output disconnected: id={}", name);
-                if let Some(bar) = state.bars.remove(&name) {
-                    bar.layer_surface.destroy();
-                    bar.surface.destroy();
-                    if let Some(ps) = bar.popup_surface {
+                if let Some(mut bar) = state.bars.remove(&name) {
+                    if let Some(ls) = bar.popup_layer_surface.take() {
+                        ls.destroy();
+                    }
+                    if let Some(ps) = bar.popup_surface.take() {
                         ps.destroy();
                     }
+                    bar.layer_surface.destroy();
+                    bar.surface.destroy();
                 }
                 state.outputs.remove(&name);
             }
@@ -965,6 +993,19 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for BarState {
             zwlr_layer_surface_v1::Event::Closed => {
                 if id < 1000 {
                     state.bars.remove(&id);
+                } else {
+                    let bar_id = id - 1000;
+                    if let Some(bar) = state.bars.get_mut(&bar_id) {
+                        if let Some(ls) = bar.popup_layer_surface.take() {
+                            ls.destroy();
+                        }
+                        if let Some(s) = bar.popup_surface.take() {
+                            s.destroy();
+                        }
+                        bar.popup_buffer = None;
+                        bar.popup_configured = false;
+                        bar.popup.visible = false;
+                    }
                 }
             }
             _ => {}
