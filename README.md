@@ -2,7 +2,7 @@
 
 A blazing-fast, zero-bloat, i3-style status bar daemon designed specifically for [Hyprland](https://hyprland.org) in pure Rust.
 
-![hyprstatus banner](https://raw.githubusercontent.com/hyprwm/Hyprland/main/assets/header.svg)
+![hyprstatus banner](./assets/hyprland-banner.png)
 
 ---
 
