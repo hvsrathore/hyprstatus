@@ -52,6 +52,133 @@ impl NetworkModule {
         module
     }
 
+    pub fn get_state(&self) -> NetState {
+        self.state.try_read().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    pub fn query_wifi_networks_sync() -> Vec<crate::modules::popup::WifiNetworkItem> {
+        let mut list = Vec::new();
+        if let Ok(output) = std::process::Command::new("nmcli")
+            .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut seen_ssids = std::collections::HashSet::new();
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 4 {
+                    let in_use = parts[0] == "*";
+                    let ssid = parts[1].trim();
+                    if ssid.is_empty() || seen_ssids.contains(ssid) {
+                        continue;
+                    }
+                    seen_ssids.insert(ssid.to_string());
+                    let signal = parts[2].parse::<u32>().unwrap_or(0);
+                    let security = parts[3].trim().to_string();
+                    list.push(crate::modules::popup::WifiNetworkItem {
+                        in_use,
+                        ssid: ssid.to_string(),
+                        signal,
+                        security,
+                    });
+                }
+            }
+        }
+        list
+    }
+
+    pub fn is_wifi_enabled_sync() -> bool {
+        if let Ok(output) = std::process::Command::new("nmcli")
+            .args(["radio", "wifi"])
+            .output()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            text.trim() == "enabled"
+        } else {
+            true
+        }
+    }
+
+    pub async fn query_wifi_networks() -> Vec<crate::modules::popup::WifiNetworkItem> {
+        let mut list = Vec::new();
+        let output = tokio::process::Command::new("nmcli")
+            .args(["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list"])
+            .output()
+            .await;
+        if let Ok(o) = output {
+            let text = String::from_utf8_lossy(&o.stdout);
+            let mut seen_ssids = std::collections::HashSet::new();
+            for line in text.lines() {
+                let parts: Vec<&str> = line.split(':').collect();
+                if parts.len() >= 4 {
+                    let in_use = parts[0] == "*";
+                    let ssid = parts[1].trim();
+                    if ssid.is_empty() || seen_ssids.contains(ssid) {
+                        continue;
+                    }
+                    seen_ssids.insert(ssid.to_string());
+                    let signal = parts[2].parse::<u32>().unwrap_or(0);
+                    let security = parts[3].trim().to_string();
+                    list.push(crate::modules::popup::WifiNetworkItem {
+                        in_use,
+                        ssid: ssid.to_string(),
+                        signal,
+                        security,
+                    });
+                }
+            }
+        }
+        list
+    }
+
+    pub async fn is_wifi_enabled() -> bool {
+        let output = tokio::process::Command::new("nmcli")
+            .args(["radio", "wifi"])
+            .output()
+            .await;
+        if let Ok(o) = output {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.trim() == "enabled"
+        } else {
+            true
+        }
+    }
+
+    pub async fn toggle_wifi_radio() {
+        let enabled = Self::is_wifi_enabled().await;
+        let arg = if enabled { "off" } else { "on" };
+        let _ = tokio::process::Command::new("nmcli")
+            .args(["radio", "wifi", arg])
+            .output()
+            .await;
+    }
+
+    pub async fn rescan_wifi() {
+        let _ = tokio::process::Command::new("nmcli")
+            .args(["dev", "wifi", "rescan"])
+            .output()
+            .await;
+    }
+
+    pub async fn connect_wifi(ssid: &str) -> Result<(), String> {
+        let output = tokio::process::Command::new("nmcli")
+            .args(["dev", "wifi", "connect", ssid])
+            .output()
+            .await;
+        match output {
+            Ok(o) if o.status.success() => Ok(()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    pub async fn disconnect_wifi(ssid: &str) {
+        let _ = tokio::process::Command::new("nmcli")
+            .args(["connection", "down", "id", ssid])
+            .output()
+            .await;
+    }
+
     fn spawn_monitor(&self, state: Arc<RwLock<NetState>>) {
         tokio::spawn(async move {
             let mut last_sample_time = Instant::now();

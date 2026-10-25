@@ -12,8 +12,8 @@ A blazing-fast, zero-bloat, i3-style status bar daemon designed specifically for
 - **WLR Layer Shell Native**: Uses the `zwlr_layer_shell_v1` protocol to anchor exclusive top/bottom panels with precise multi-monitor layout management.
 - **Dynamic Multi-Monitor & Hot-Plugging**: Automatically tracks `wl_output` additions and removals, maintaining independent rendering loops and per-output configuration overrides (e.g. `[output.HDMI-A-1]`).
 - **Interactive Workspace Thumbnails**: Hovering over workspace pills reveals miniature floating wireframe application previews; clicking any preview thumbnail immediately dispatches focus to that window via Hyprland IPC. Full support for modern Hyprland Lua (`hl.dsp.focus`) dispatching and legacy IPC.
-- **Real-Time PipeWire Audio**: Built-in native PipeWire client thread monitoring default sink/source node states, volume levels, mute toggles, and microphone activity. Supports scroll-wheel volume adjustments and click-to-mute.
-- **Netlink Network & Wi-Fi Modal**: Asynchronous netlink interface monitoring and real-time throughput calculations. Displays dynamic signal strength icons (`󰤨`, `󰤥`, `󰤢`, `󰤟`, `󰤮`), active SSID, and connection type (Ethernet `󰈀` vs Wi-Fi). Clicking opens an interactive Wi-Fi modal showing available networks, signal strength, and instant connection prompts.
+- **Real-Time PipeWire Audio & Sound Popover**: Built-in native PipeWire client thread monitoring default sink/source node states, volume levels, mute toggles, and microphone activity. Clicking the audio block opens a sleek native Quick Settings popover menu featuring an interactive volume slider, step controls (`-5%` / `+5%`), preset buttons (`25%`, `50%`, `75%`, `100%`), master mute toggle, and microphone input control.
+- **Netlink Network & Wi-Fi Popover**: Asynchronous netlink interface monitoring and real-time throughput calculations. Displays dynamic signal strength icons (`󰤨`, `󰤥`, `󰤢`, `󰤟`, `󰤮`), active SSID, and connection type. Clicking opens a matching native Quick Settings popover menu displaying Wi-Fi radio on/off toggle, network rescan, available networks list with signal bars, and one-click connect/disconnect.
 - **Sysfs Battery & Power Management**: Direct sysfs metrics parsing (`/sys/class/power_supply/BAT*/*` and `AC`) for charging status, percentage, wattage, and time estimates, with automated desktop notifications below 15%.
 - **Braille Performance Sparklines**: Samples `/proc/stat` and `/proc/meminfo` into rolling ring buffers, rasterizing smooth inline Unicode Braille performance graphs (e.g., `⣀⣤⣾⣿`) for CPU utilization and RAM usage without external processes.
 - **StatusNotifierItem (SNI) System Tray**: Implements the FreeDesktop `org.kde.StatusNotifierWatcher` and `org.kde.StatusNotifierItem` DBus interfaces via `zbus`, allowing background applications (Nextcloud, Discord, Steam, etc.) to register clickable tray icons with custom pixmaps.
@@ -154,10 +154,16 @@ right = ["tray", "network", "audio", "battery", "clock"]
 | **Workspace Pill** | Scroll Wheel Up / Down | Cycles to previous / next workspace |
 | **Workspace Pill** | Hover | Opens live interactive window preview popup |
 | **Workspace Popup** | Left Click on thumbnail | Dispatches focus directly to the target window |
-| **Audio Block** | Left Click | Toggles master speaker mute |
+| **Audio Block** | Left Click | Opens native Sound & Volume Quick Settings popover |
 | **Audio Block** | Right Click | Toggles microphone mute |
-| **Audio Block** | Scroll Wheel Up / Down | Adjusts volume by ±5% |
-| **Network Block** | Left Click | Opens interactive Wi-Fi selection modal or configured launcher |
+| **Audio Block** | Scroll Wheel Up / Down | Quick volume adjustment by ±5% |
+| **Sound Popover** | Click / Drag Slider | Sets master volume directly to percentage |
+| **Sound Popover** | Step / Preset / Mute Buttons | Adjusts ±5%, sets presets (0-100%), toggles mute |
+| **Sound Popover** | Microphone Toggle | Toggles microphone input mute |
+| **Network Block** | Left Click | Opens native Wi-Fi Quick Settings popover |
+| **Network Block** | Right Click | Launches `nmtui` in terminal |
+| **Wi-Fi Popover** | Network Row Click | Connects to network or disconnects active Wi-Fi |
+| **Wi-Fi Popover** | Toggle / Scan Buttons | Toggles Wi-Fi radio ON/OFF or triggers scan |
 | **Perf Block** | Left Click | Launches `btop` / `htop` system monitor |
 | **Tray Icon** | Left Click | Forwards `Activate` DBus method to application |
 | **Tray Icon** | Right Click | Forwards `ContextMenu` DBus method to application |

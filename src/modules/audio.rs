@@ -169,6 +169,16 @@ impl AudioModule {
         }
     }
 
+    pub async fn set_volume(&self, percent: u32) {
+        let vol = percent.min(150);
+        self.state.volume.store(vol, Ordering::Relaxed);
+        let _ = Command::new("pactl")
+            .args(["set-sink-volume", "@DEFAULT_SINK@", &format!("{}%", vol)])
+            .status()
+            .await;
+        Self::query_pactl_audio(&self.state).await;
+    }
+
     pub async fn volume_up(&self, step: u32) {
         let cur = self.state.volume.load(Ordering::Relaxed);
         let new_vol = (cur + step).min(150);

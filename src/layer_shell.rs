@@ -5,7 +5,10 @@ use crate::modules::battery::BatteryModule;
 use crate::modules::clock::ClockModule;
 use crate::modules::network::NetworkModule;
 use crate::modules::perf::PerfModule;
-use crate::modules::popup::WorkspacePopup;
+use crate::modules::popup::{
+    AudioPopover, AudioPopoverAction, BarPopover, PopoverKind, WifiPopover, WifiPopoverAction,
+    WorkspacePopup,
+};
 use crate::modules::tray::TrayModule;
 use crate::modules::window_title::WindowTitleModule;
 use crate::modules::workspace::WorkspaceModule;
@@ -79,8 +82,8 @@ pub struct BarOutput {
     pub configured: bool,
     pub buffer: Option<ShmBuffer>,
     pub click_regions: Vec<ClickRegion>,
-    // Popup state for this output
-    pub popup: WorkspacePopup,
+    // Popover state for this output (workspace preview, audio quick menu, wifi quick menu)
+    pub popover: BarPopover,
     pub popup_surface: Option<wl_surface::WlSurface>,
     pub popup_layer_surface: Option<ZwlrLayerSurfaceV1>,
     pub popup_buffer: Option<ShmBuffer>,
@@ -112,6 +115,7 @@ pub struct BarState {
     pub pointer_surface: Option<wl_surface::WlSurface>,
     pub pointer_x: f64,
     pub pointer_y: f64,
+    pub pointer_pressed: bool,
     pub hovered_ws_pill: Option<(u32, i32, i32, u32)>, // (output_id, ws_id, x, w)
 }
 
@@ -149,6 +153,7 @@ impl BarState {
             pointer_surface: None,
             pointer_x: 0.0,
             pointer_y: 0.0,
+            pointer_pressed: false,
             hovered_ws_pill: None,
         }
     }
@@ -212,9 +217,6 @@ impl BarState {
 
         surface.commit();
 
-        let popup_w = self.config.modules.popup.width;
-        let popup_h = self.config.modules.popup.height;
-
         println!("[layer_shell] Created panel surface for output {} ({})", name_opt, registry_id);
 
         self.bars.insert(
@@ -230,7 +232,7 @@ impl BarState {
                 configured: false,
                 buffer: None,
                 click_regions: Vec::new(),
-                popup: WorkspacePopup::new(popup_w, popup_h),
+                popover: BarPopover::new(),
                 popup_surface: None,
                 popup_layer_surface: None,
                 popup_buffer: None,
@@ -555,81 +557,180 @@ impl BarState {
     }
 
     pub fn handle_pointer_click(&mut self, qh: &QueueHandle<Self>, button: MouseButton, x: i32, y: i32) {
-        // If click is on a popup surface, check popup window thumbnail clicks
-        for bar in self.bars.values() {
-            if bar.popup.visible && bar.popup_surface.as_ref() == self.pointer_surface.as_ref() {
-                if bar.popup.handle_click(x, y) {
-                    self.hide_workspace_popup();
-                    return;
+        let mut hide_reg_id = None;
+        let mut rerender_popover = None;
+        let mut rerender_bar = None;
+
+        // 1. If click is on a popup surface, delegate directly to the active popover menu
+        for (&reg_id, bar) in self.bars.iter_mut() {
+            if bar.popover.visible && bar.popup_surface.as_ref() == self.pointer_surface.as_ref() {
+                match &mut bar.popover.kind {
+                    PopoverKind::Workspace(ws) => {
+                        if ws.handle_click(x, y) {
+                            hide_reg_id = Some(reg_id);
+                        }
+                    }
+                    PopoverKind::Audio(audio) => {
+                        let action = audio.handle_click(x, y);
+                        match action {
+                            AudioPopoverAction::Close => {
+                                hide_reg_id = Some(reg_id);
+                            }
+                            AudioPopoverAction::SetVolume(vol) => {
+                                audio.volume = vol;
+                                audio.sink_muted = false;
+                                let mod_audio = self.mod_audio.clone();
+                                tokio::spawn(async move {
+                                    mod_audio.set_volume(vol).await;
+                                });
+                                rerender_popover = Some(reg_id);
+                                rerender_bar = Some(reg_id);
+                            }
+                            AudioPopoverAction::VolumeDelta(delta) => {
+                                let new_vol = if delta < 0 {
+                                    audio.volume.saturating_sub((-delta) as u32)
+                                } else {
+                                    (audio.volume + delta as u32).min(150)
+                                };
+                                audio.volume = new_vol;
+                                audio.sink_muted = false;
+                                let mod_audio = self.mod_audio.clone();
+                                tokio::spawn(async move {
+                                    mod_audio.set_volume(new_vol).await;
+                                });
+                                rerender_popover = Some(reg_id);
+                                rerender_bar = Some(reg_id);
+                            }
+                            AudioPopoverAction::ToggleMute => {
+                                audio.sink_muted = !audio.sink_muted;
+                                let mod_audio = self.mod_audio.clone();
+                                tokio::spawn(async move {
+                                    mod_audio.toggle_mute().await;
+                                });
+                                rerender_popover = Some(reg_id);
+                                rerender_bar = Some(reg_id);
+                            }
+                            AudioPopoverAction::ToggleMicMute => {
+                                audio.source_muted = !audio.source_muted;
+                                let mod_audio = self.mod_audio.clone();
+                                tokio::spawn(async move {
+                                    mod_audio.toggle_mic_mute().await;
+                                });
+                                rerender_popover = Some(reg_id);
+                                rerender_bar = Some(reg_id);
+                            }
+                            AudioPopoverAction::None => {}
+                        }
+                    }
+                    PopoverKind::Wifi(wifi) => {
+                        let action = wifi.handle_click(x, y);
+                        match action {
+                            WifiPopoverAction::Close => {
+                                hide_reg_id = Some(reg_id);
+                            }
+                            WifiPopoverAction::ToggleRadio => {
+                                wifi.wifi_enabled = !wifi.wifi_enabled;
+                                tokio::spawn(async move {
+                                    NetworkModule::toggle_wifi_radio().await;
+                                });
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::Rescan => {
+                                tokio::spawn(async move {
+                                    NetworkModule::rescan_wifi().await;
+                                });
+                                rerender_popover = Some(reg_id);
+                            }
+                            WifiPopoverAction::Connect(ssid) => {
+                                let s = ssid.clone();
+                                tokio::spawn(async move {
+                                    let _ = NetworkModule::connect_wifi(&s).await;
+                                });
+                                hide_reg_id = Some(reg_id);
+                            }
+                            WifiPopoverAction::Disconnect(ssid) => {
+                                let s = ssid.clone();
+                                tokio::spawn(async move {
+                                    NetworkModule::disconnect_wifi(&s).await;
+                                });
+                                hide_reg_id = Some(reg_id);
+                            }
+                            WifiPopoverAction::OpenNmtui => {
+                                hide_reg_id = Some(reg_id);
+                                tokio::spawn(async move {
+                                    let _ = tokio::process::Command::new("alacritty")
+                                        .arg("-e")
+                                        .arg("nmtui")
+                                        .spawn();
+                                });
+                            }
+                            WifiPopoverAction::None => {}
+                        }
+                    }
+                    PopoverKind::None => {}
                 }
+                break;
             }
         }
 
-        // Find which bar contains this coordinate (matching the surface pointer is over)
-        for bar in self.bars.values() {
+        if let Some(id) = hide_reg_id {
+            self.hide_popover(id);
+            return;
+        }
+        if let Some(id) = rerender_popover {
+            self.render_popup(qh, id);
+        }
+        if let Some(id) = rerender_bar {
+            self.render_bar(qh, id);
+            return;
+        }
+        if rerender_popover.is_some() {
+            return;
+        }
+
+        // 2. Click is on the status bar itself
+        let mut clicked: Option<(u32, ClickAction, i32, u32)> = None;
+        for (&reg_id, bar) in &self.bars {
             if Some(&bar.surface) == self.pointer_surface.as_ref() {
                 for cr in &bar.click_regions {
                     if x >= cr.x && x < cr.x + cr.width as i32 && y >= cr.y && y < cr.y + cr.height as i32 {
-                    match &cr.action {
-                        ClickAction::SwitchWorkspace(id) => {
-                            let ws_id = *id;
-                            match button {
-                                MouseButton::ScrollUp => {
-                                    tokio::spawn(async move {
-                                        let _ = HyprlandIpc::cycle_workspace(false).await;
-                                    });
-                                }
-                                MouseButton::ScrollDown => {
-                                    tokio::spawn(async move {
-                                        let _ = HyprlandIpc::cycle_workspace(true).await;
-                                    });
-                                }
-                                _ => {
-                                    self.hide_workspace_popup();
-                                    tokio::spawn(async move {
-                                        let _ = HyprlandIpc::switch_workspace(ws_id).await;
-                                    });
-                                }
-                            }
-                            return;
-                        }
-                        ClickAction::ToggleAudioMute => {
-                            let mod_audio = self.mod_audio.clone();
-                            let step = self.config.modules.audio.step_percent;
-                            match button {
-                                MouseButton::Right => {
-                                    let cur = mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
-                                    mod_audio.state.source_muted.store(!cur, std::sync::atomic::Ordering::Relaxed);
-                                }
-                                MouseButton::ScrollUp => {
-                                    let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
-                                    mod_audio.state.volume.store((cur + step).min(150), std::sync::atomic::Ordering::Relaxed);
-                                }
-                                MouseButton::ScrollDown => {
-                                    let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
-                                    mod_audio.state.volume.store(cur.saturating_sub(step), std::sync::atomic::Ordering::Relaxed);
-                                }
-                                _ => {
-                                    let cur = mod_audio.state.sink_muted.load(std::sync::atomic::Ordering::Relaxed);
-                                    mod_audio.state.sink_muted.store(!cur, std::sync::atomic::Ordering::Relaxed);
-                                }
-                            }
-                            let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
-                            for id in reg_ids {
-                                self.render_bar(qh, id);
-                            }
+                        clicked = Some((reg_id, cr.action.clone(), cr.x, cr.width));
+                        break;
+                    }
+                }
+                break;
+            }
+        }
+
+        if let Some((active_reg_id, action, cr_x, cr_width)) = clicked {
+            match action {
+                ClickAction::SwitchWorkspace(id) => {
+                    let ws_id = id;
+                    match button {
+                        MouseButton::ScrollUp => {
                             tokio::spawn(async move {
-                                match button {
-                                    MouseButton::Right => mod_audio.toggle_mic_mute().await,
-                                    MouseButton::ScrollUp => mod_audio.volume_up(step).await,
-                                    MouseButton::ScrollDown => mod_audio.volume_down(step).await,
-                                    _ => mod_audio.toggle_mute().await,
-                                }
+                                let _ = HyprlandIpc::cycle_workspace(false).await;
                             });
-                            return;
                         }
-                        ClickAction::ToggleMicMute => {
-                            let mod_audio = self.mod_audio.clone();
+                        MouseButton::ScrollDown => {
+                            tokio::spawn(async move {
+                                let _ = HyprlandIpc::cycle_workspace(true).await;
+                            });
+                        }
+                        _ => {
+                            self.hide_popover(active_reg_id);
+                            tokio::spawn(async move {
+                                let _ = HyprlandIpc::switch_workspace(ws_id).await;
+                            });
+                        }
+                    }
+                }
+                ClickAction::ToggleAudioMute => {
+                    let anchor_x = cr_x + (cr_width as i32 / 2);
+                    let mod_audio = self.mod_audio.clone();
+                    let step = self.config.modules.audio.step_percent;
+                    match button {
+                        MouseButton::Right => {
                             let cur = mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
                             mod_audio.state.source_muted.store(!cur, std::sync::atomic::Ordering::Relaxed);
                             let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
@@ -639,11 +740,8 @@ impl BarState {
                             tokio::spawn(async move {
                                 mod_audio.toggle_mic_mute().await;
                             });
-                            return;
                         }
-                        ClickAction::AudioVolumeUp => {
-                            let mod_audio = self.mod_audio.clone();
-                            let step = self.config.modules.audio.step_percent;
+                        MouseButton::ScrollUp => {
                             let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
                             mod_audio.state.volume.store((cur + step).min(150), std::sync::atomic::Ordering::Relaxed);
                             let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
@@ -653,11 +751,8 @@ impl BarState {
                             tokio::spawn(async move {
                                 mod_audio.volume_up(step).await;
                             });
-                            return;
                         }
-                        ClickAction::AudioVolumeDown => {
-                            let mod_audio = self.mod_audio.clone();
-                            let step = self.config.modules.audio.step_percent;
+                        MouseButton::ScrollDown => {
                             let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
                             mod_audio.state.volume.store(cur.saturating_sub(step), std::sync::atomic::Ordering::Relaxed);
                             let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
@@ -667,64 +762,104 @@ impl BarState {
                             tokio::spawn(async move {
                                 mod_audio.volume_down(step).await;
                             });
-                            return;
                         }
-                        ClickAction::NetworkClick => {
+                        _ => {
+                            self.toggle_audio_popover(qh, active_reg_id, anchor_x);
+                        }
+                    }
+                }
+                ClickAction::ToggleMicMute => {
+                    let mod_audio = self.mod_audio.clone();
+                    let cur = mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
+                    mod_audio.state.source_muted.store(!cur, std::sync::atomic::Ordering::Relaxed);
+                    let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+                    for id in reg_ids {
+                        self.render_bar(qh, id);
+                    }
+                    tokio::spawn(async move {
+                        mod_audio.toggle_mic_mute().await;
+                    });
+                }
+                ClickAction::AudioVolumeUp => {
+                    let mod_audio = self.mod_audio.clone();
+                    let step = self.config.modules.audio.step_percent;
+                    let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
+                    mod_audio.state.volume.store((cur + step).min(150), std::sync::atomic::Ordering::Relaxed);
+                    let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+                    for id in reg_ids {
+                        self.render_bar(qh, id);
+                    }
+                    tokio::spawn(async move {
+                        mod_audio.volume_up(step).await;
+                    });
+                }
+                ClickAction::AudioVolumeDown => {
+                    let mod_audio = self.mod_audio.clone();
+                    let step = self.config.modules.audio.step_percent;
+                    let cur = mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
+                    mod_audio.state.volume.store(cur.saturating_sub(step), std::sync::atomic::Ordering::Relaxed);
+                    let reg_ids: Vec<u32> = self.bars.keys().copied().collect();
+                    for id in reg_ids {
+                        self.render_bar(qh, id);
+                    }
+                    tokio::spawn(async move {
+                        mod_audio.volume_down(step).await;
+                    });
+                }
+                ClickAction::NetworkClick => {
+                    let anchor_x = cr_x + (cr_width as i32 / 2);
+                    match button {
+                        MouseButton::Right => {
                             let cmd = self.config.modules.network.click_command.clone();
-                            tokio::spawn(async move {
-                                if cmd == "nmtui" || cmd == "hyprstatus --wifi-menu" || cmd == "wifi-menu" || cmd.is_empty() {
-                                    NetworkModule::open_wifi_modal().await;
-                                } else {
-                                    let _ = tokio::process::Command::new("sh")
-                                        .arg("-c")
-                                        .arg(&cmd)
-                                        .spawn();
-                                }
-                            });
-                            return;
-                        }
-                        ClickAction::PerfClick => {
-                            let cmd = self.config.modules.perf.click_command.clone();
                             tokio::spawn(async move {
                                 let _ = tokio::process::Command::new("alacritty")
                                     .arg("-e")
-                                    .arg(&cmd)
+                                    .arg(if cmd.is_empty() { "nmtui" } else { &cmd })
                                     .spawn();
                             });
-                            return;
                         }
-                        ClickAction::ClockClick => {
-                            tokio::spawn(async move {
-                                let _ = tokio::process::Command::new("notify-send")
-                                    .args(["-a", "hyprstatus", "Calendar", "Calendar notification"])
-                                    .spawn();
-                            });
-                            return;
+                        _ => {
+                            self.toggle_wifi_popover(qh, active_reg_id, anchor_x);
                         }
-                        ClickAction::TrayActivate(service) => {
-                            let mod_tray = self.mod_tray.clone();
-                            let s = service.clone();
-                            tokio::spawn(async move {
-                                if button == MouseButton::Right {
-                                    mod_tray.context_menu_item(&s, x, y).await;
-                                } else {
-                                    mod_tray.activate_item(&s, x, y).await;
-                                }
-                            });
-                            return;
-                        }
-                        ClickAction::TrayContextMenu(service) => {
-                            let mod_tray = self.mod_tray.clone();
-                            let s = service.clone();
-                            tokio::spawn(async move {
-                                mod_tray.context_menu_item(&s, x, y).await;
-                            });
-                            return;
-                        }
-                        _ => {}
-                    }
                     }
                 }
+                ClickAction::PerfClick => {
+                    self.hide_popover(active_reg_id);
+                    let cmd = self.config.modules.perf.click_command.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::process::Command::new("alacritty")
+                            .arg("-e")
+                            .arg(&cmd)
+                            .spawn();
+                    });
+                }
+                ClickAction::ClockClick => {
+                    self.hide_popover(active_reg_id);
+                    tokio::spawn(async move {
+                        let _ = tokio::process::Command::new("notify-send")
+                            .args(["-a", "hyprstatus", "Calendar", "Calendar notification"])
+                            .spawn();
+                    });
+                }
+                ClickAction::TrayActivate(service) => {
+                    self.hide_popover(active_reg_id);
+                    let mod_tray = self.mod_tray.clone();
+                    tokio::spawn(async move {
+                        if button == MouseButton::Right {
+                            mod_tray.context_menu_item(&service, x, y).await;
+                        } else {
+                            mod_tray.activate_item(&service, x, y).await;
+                        }
+                    });
+                }
+                ClickAction::TrayContextMenu(service) => {
+                    self.hide_popover(active_reg_id);
+                    let mod_tray = self.mod_tray.clone();
+                    tokio::spawn(async move {
+                        mod_tray.context_menu_item(&service, x, y).await;
+                    });
+                }
+                _ => {}
             }
         }
     }
@@ -732,6 +867,37 @@ impl BarState {
     pub fn handle_pointer_motion(&mut self, qh: &QueueHandle<Self>, x: f64, y: f64) {
         self.pointer_x = x;
         self.pointer_y = y;
+
+        // If pointer is pressed inside audio popover, handle dragging volume slider smoothly
+        if self.pointer_pressed {
+            let mut drag_update = None;
+            for (&reg_id, bar) in self.bars.iter_mut() {
+                if bar.popover.visible && bar.popup_surface.as_ref() == self.pointer_surface.as_ref() {
+                    if let PopoverKind::Audio(audio) = &mut bar.popover.kind {
+                        if y >= 58.0 && y <= 86.0 {
+                            let ratio = ((x - 16.0) / 288.0).clamp(0.0, 1.0);
+                            let new_vol = (ratio * 100.0).round() as u32;
+                            if audio.volume != new_vol {
+                                audio.volume = new_vol;
+                                audio.sink_muted = false;
+                                drag_update = Some((reg_id, new_vol));
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+
+            if let Some((reg_id, new_vol)) = drag_update {
+                let mod_audio = self.mod_audio.clone();
+                tokio::spawn(async move {
+                    mod_audio.set_volume(new_vol).await;
+                });
+                self.render_popup(qh, reg_id);
+                self.render_bar(qh, reg_id);
+                return;
+            }
+        }
 
         // Check if cursor hovers over any workspace pill on the active bar
         let xi = x as i32;
@@ -764,14 +930,25 @@ impl BarState {
         }
     }
 
-    pub fn show_workspace_popup(&mut self, qh: &QueueHandle<Self>, reg_id: u32, ws_id: i32, anchor_x: i32) {
-        let clients = self.mod_workspace.get_clients_for_workspace(ws_id);
+    pub fn show_popover_surface(&mut self, qh: &QueueHandle<Self>, reg_id: u32, anchor_x: i32) {
         let bar = match self.bars.get_mut(&reg_id) {
             Some(b) => b,
             None => return,
         };
 
-        bar.popup.update_clients(ws_id, anchor_x, &clients, bar.width, bar.height);
+        bar.popover.anchor_x = anchor_x;
+        bar.popover.visible = true;
+
+        let pop_w = bar.popover.width;
+        let pop_h = bar.popover.height;
+
+        let mut margin_left = anchor_x - (pop_w as i32 / 2);
+        if margin_left + pop_w as i32 > bar.width as i32 - 10 {
+            margin_left = (bar.width as i32 - pop_w as i32 - 10).max(10);
+        }
+        if margin_left < 10 {
+            margin_left = 10;
+        }
 
         let (anchor, margin_top, margin_bottom) = if self.config.bar.position == "bottom" {
             (
@@ -787,7 +964,6 @@ impl BarState {
             )
         };
 
-        // If popup surface doesn't exist, create it via layer_shell
         if bar.popup_surface.is_none() {
             let compositor = match &self.compositor {
                 Some(c) => c,
@@ -809,20 +985,22 @@ impl BarState {
             );
 
             layer_surface.set_anchor(anchor);
-            layer_surface.set_size(bar.popup.width, bar.popup.height);
-            layer_surface.set_margin(margin_top, 0, margin_bottom, anchor_x);
+            layer_surface.set_size(pop_w, pop_h);
+            layer_surface.set_margin(margin_top, 0, margin_bottom, margin_left);
             layer_surface.set_exclusive_zone(-1);
 
-            // Initial commit without buffer attached (required by layer shell protocol)
             surface.commit();
 
             bar.popup_surface = Some(surface);
             bar.popup_layer_surface = Some(layer_surface);
             bar.popup_configured = false;
         } else {
-            // Popup surface already exists, update position margin
             if let Some(ls) = &bar.popup_layer_surface {
-                ls.set_margin(margin_top, 0, margin_bottom, anchor_x);
+                ls.set_size(pop_w, pop_h);
+                ls.set_margin(margin_top, 0, margin_bottom, margin_left);
+            }
+            if let Some(s) = &bar.popup_surface {
+                s.commit();
             }
             if bar.popup_configured {
                 self.render_popup(qh, reg_id);
@@ -830,10 +1008,94 @@ impl BarState {
         }
     }
 
-    pub fn hide_workspace_popup(&mut self) {
-        for bar in self.bars.values_mut() {
-            if bar.popup.visible || bar.popup_surface.is_some() {
-                bar.popup.visible = false;
+    pub fn show_workspace_popup(&mut self, qh: &QueueHandle<Self>, reg_id: u32, ws_id: i32, anchor_x: i32) {
+        if let Some(bar) = self.bars.get(&reg_id) {
+            if bar.popover.visible && matches!(bar.popover.kind, PopoverKind::Audio(_) | PopoverKind::Wifi(_)) {
+                return;
+            }
+        }
+
+        let clients = self.mod_workspace.get_clients_for_workspace(ws_id);
+        let bar = match self.bars.get_mut(&reg_id) {
+            Some(b) => b,
+            None => return,
+        };
+
+        let mut ws = WorkspacePopup::new(self.config.modules.popup.width, self.config.modules.popup.height);
+        ws.update_clients(ws_id, anchor_x, &clients, bar.width, bar.height);
+
+        bar.popover.kind = PopoverKind::Workspace(ws);
+        bar.popover.width = self.config.modules.popup.width;
+        bar.popover.height = self.config.modules.popup.height;
+
+        self.show_popover_surface(qh, reg_id, anchor_x);
+    }
+
+    pub fn toggle_audio_popover(&mut self, qh: &QueueHandle<Self>, reg_id: u32, anchor_x: i32) {
+        if let Some(bar) = self.bars.get(&reg_id) {
+            if bar.popover.visible && matches!(bar.popover.kind, PopoverKind::Audio(_)) {
+                self.hide_popover(reg_id);
+                return;
+            }
+        }
+
+        let vol = self.mod_audio.state.volume.load(std::sync::atomic::Ordering::Relaxed);
+        let sink_muted = self.mod_audio.state.sink_muted.load(std::sync::atomic::Ordering::Relaxed);
+        let source_muted = self.mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
+
+        let audio_pop = AudioPopover::new(
+            320,
+            240,
+            vol,
+            sink_muted,
+            source_muted,
+            "Default Audio Output (PipeWire)".into(),
+        );
+
+        if let Some(bar) = self.bars.get_mut(&reg_id) {
+            bar.popover.kind = PopoverKind::Audio(audio_pop);
+            bar.popover.width = 320;
+            bar.popover.height = 240;
+        }
+
+        self.show_popover_surface(qh, reg_id, anchor_x);
+    }
+
+    pub fn toggle_wifi_popover(&mut self, qh: &QueueHandle<Self>, reg_id: u32, anchor_x: i32) {
+        if let Some(bar) = self.bars.get(&reg_id) {
+            if bar.popover.visible && matches!(bar.popover.kind, PopoverKind::Wifi(_)) {
+                self.hide_popover(reg_id);
+                return;
+            }
+        }
+
+        let enabled = NetworkModule::is_wifi_enabled_sync();
+        let networks = NetworkModule::query_wifi_networks_sync();
+        let net_state = self.mod_network.get_state();
+
+        let wifi_pop = WifiPopover::new(
+            340,
+            350,
+            enabled,
+            net_state.ssid.clone(),
+            net_state.signal_percent,
+            networks,
+        );
+
+        if let Some(bar) = self.bars.get_mut(&reg_id) {
+            bar.popover.kind = PopoverKind::Wifi(wifi_pop);
+            bar.popover.width = 340;
+            bar.popover.height = 350;
+        }
+
+        self.show_popover_surface(qh, reg_id, anchor_x);
+    }
+
+    pub fn hide_popover(&mut self, reg_id: u32) {
+        if let Some(bar) = self.bars.get_mut(&reg_id) {
+            if bar.popover.visible || bar.popup_surface.is_some() {
+                bar.popover.visible = false;
+                bar.popover.kind = PopoverKind::None;
                 bar.popup_configured = false;
                 if let Some(ls) = bar.popup_layer_surface.take() {
                     ls.destroy();
@@ -843,6 +1105,19 @@ impl BarState {
                 }
                 bar.popup_buffer = None;
             }
+        }
+        self.hovered_ws_pill = None;
+    }
+
+    pub fn hide_workspace_popup(&mut self) {
+        let mut to_hide = Vec::new();
+        for (reg_id, bar) in &self.bars {
+            if bar.popover.visible && matches!(bar.popover.kind, PopoverKind::Workspace(_)) {
+                to_hide.push(*reg_id);
+            }
+        }
+        for id in to_hide {
+            self.hide_popover(id);
         }
         self.hovered_ws_pill = None;
     }
@@ -858,12 +1133,12 @@ impl BarState {
             None => return,
         };
 
-        if !bar.popup_configured || !bar.popup.visible || bar.popup_surface.is_none() {
+        if !bar.popup_configured || !bar.popover.visible || bar.popup_surface.is_none() {
             return;
         }
 
-        let pw = bar.popup.width;
-        let ph = bar.popup.height;
+        let pw = bar.popover.width;
+        let ph = bar.popover.height;
 
         if bar.popup_buffer.as_ref().map_or(true, |b| b.width != pw || b.height != ph) {
             match ShmBuffer::new(shm, qh, pw, ph) {
@@ -876,7 +1151,7 @@ impl BarState {
         }
 
         let pbuf = bar.popup_buffer.as_mut().unwrap();
-        bar.popup.render(&mut self.renderer, &mut pbuf.mmap[..], &self.config);
+        bar.popover.render(&mut self.renderer, &mut pbuf.mmap[..], &self.config);
 
         if let Some(s) = &bar.popup_surface {
             s.attach(Some(&pbuf.buffer), 0, 0);
@@ -1070,7 +1345,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for BarState {
                         }
                         bar.popup_buffer = None;
                         bar.popup_configured = false;
-                        bar.popup.visible = false;
+                        bar.popover.visible = false;
                     }
                 }
             }
@@ -1158,6 +1433,7 @@ impl Dispatch<wl_pointer::WlPointer, ()> for BarState {
             }
             wl_pointer::Event::Leave { .. } => {
                 state.pointer_surface = None;
+                state.pointer_pressed = false;
                 state.hide_workspace_popup();
             }
             wl_pointer::Event::Motion {
@@ -1168,7 +1444,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for BarState {
                 state.handle_pointer_motion(qh, surface_x, surface_y);
             }
             wl_pointer::Event::Button { button, state: btn_state, .. } => {
-                if btn_state == wayland_client::WEnum::Value(wayland_client::protocol::wl_pointer::ButtonState::Pressed) {
+                let pressed = btn_state == wayland_client::WEnum::Value(wayland_client::protocol::wl_pointer::ButtonState::Pressed);
+                state.pointer_pressed = pressed;
+                if pressed {
                     let mouse_btn = match button {
                         272 => MouseButton::Left,
                         273 => MouseButton::Right,
