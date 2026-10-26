@@ -1,6 +1,6 @@
 # Maintainer: Harsh Vardhan <4444hv@gmail.com>
 pkgname=hyprstatus
-pkgver=1.0.5
+pkgver=1.0.6
 pkgrel=1
 pkgdesc="A blazing-fast, zero-bloat, i3-style status bar daemon designed specifically for Hyprland in pure Rust"
 arch=('x86_64' 'aarch64')

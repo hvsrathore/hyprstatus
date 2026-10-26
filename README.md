@@ -36,8 +36,8 @@
       Pure Rust software rasterizer built on <code>fontdue</code> blitting directly to <code>wl_shm</code> shared memory with full double-buffering. Idle memory usage is ~15-20 MB, CPU usage is near 0%, and frame draws finish in fractions of a millisecond without tearing or flickering.
     </td>
     <td width="50%">
-      <h3>🪟 Interactive Window Wireframes</h3>
-      Hovering over workspace pills reveals floating wireframe layout previews showing relative window positions and application glyphs (󰊯 Chrome, 󰞷 Kitty, 󰈹 Firefox, 󰨞 Code). Click any wireframe to focus that window instantly!
+      <h3>🪟 Dynamic Workspaces & Wireframes</h3>
+      Displays only workspaces containing active windows plus your current active workspace, eliminating clutter from empty workspaces. Transitions render instantaneously (&lt;1ms) via non-blocking Hyprland IPC event dispatching, with interactive hovering layout wireframes!
     </td>
   </tr>
   <tr>
@@ -92,8 +92,10 @@ hyprstatus replaces clunky terminal launchers and heavyweight modals with bespok
 * **In-Popover Password Authentication**: Secure networks prompt for credentials directly inside the Wi-Fi popover with full keyboard support, password visibility toggle, and instant error feedback—no external modal windows needed.
 * **Terminal Fallback**: Click "Network Manager Settings" or right-click the bar module to launch `nmtui` in your favorite terminal (`kitty`, `alacritty`, `foot`, etc.).
 
-### 3. 🪟 Workspace Layout Wireframes
-* **Geometric Layout Miniatures**: Displays a visual bounding wireframe representing window geometry on each workspace.
+### 3. 🪟 Dynamic Workspaces & Layout Wireframes
+* **Dynamic Workspace Pills**: Only workspaces containing any windows (and the active workspace you are currently in) are displayed, keeping your bar clean and clutter-free.
+* **Instantaneous Active Indicator**: Sub-millisecond UI updates when switching workspaces via keyboard shortcuts or mouse clicks.
+* **Geometric Layout Miniatures**: Displays a visual bounding wireframe representing window geometry on each workspace on hover.
 * **Application Icons**: Detects classes and embeds Nerd Font glyphs (`󰊯` Chrome, `󰞷` Terminal, `󰈹` Firefox, `󰨞` Editor, `󰘑` Files).
 * **Direct Window Focus**: Clicking any window thumbnail dispatches focus directly to that client via Hyprland IPC (Lua dispatch `hl.dsp.focus` or legacy).
 

@@ -2,10 +2,10 @@
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 
 #[derive(Debug, Clone)]
 pub enum HyprEvent {
@@ -158,12 +158,18 @@ impl HyprlandIpc {
 
     pub async fn send_command(cmd: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let path = Self::get_socket_path().ok_or("Hyprland socket not found")?;
-        let mut stream = UnixStream::connect(path).await?;
-        stream.write_all(cmd.as_bytes()).await?;
-        stream.shutdown().await?;
-        let mut response = String::new();
-        stream.read_to_string(&mut response).await?;
-        Ok(response)
+        let fut = async {
+            let mut stream = UnixStream::connect(path).await?;
+            stream.write_all(cmd.as_bytes()).await?;
+            stream.shutdown().await?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await?;
+            Ok::<String, Box<dyn std::error::Error + Send + Sync>>(response)
+        };
+        match tokio::time::timeout(tokio::time::Duration::from_millis(500), fut).await {
+            Ok(res) => res,
+            Err(_) => Err("Hyprland socket command timed out".into()),
+        }
     }
 
     pub async fn dispatch(cmd: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -266,21 +272,40 @@ impl HyprlandIpc {
     }
 
     pub async fn refresh_state(state: &Arc<RwLock<HyprState>>) {
-        let ws = Self::query_workspaces().await;
-        let clients = Self::query_clients().await;
-        let monitors = Self::query_monitors().await;
+        let (ws, clients, monitors) = tokio::join!(
+            Self::query_workspaces(),
+            Self::query_clients(),
+            Self::query_monitors()
+        );
 
-        let mut st = state.write().await;
+        let mut st = match state.write() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
         st.workspaces = ws;
         st.clients = clients;
-        st.monitors = monitors.clone();
 
-        for m in monitors {
-            if m.focused {
-                st.active_workspace = m.activeWorkspace.id;
-                break;
+        // Preserve in-memory active workspace in case a newer workspace switch event
+        // arrived while queries were in flight
+        let current_active_ws = st.active_workspace;
+        let mut updated_monitors = monitors;
+        let single_mon = updated_monitors.len() == 1;
+        if current_active_ws > 0 {
+            for m in &mut updated_monitors {
+                if m.focused || single_mon {
+                    m.activeWorkspace.id = current_active_ws;
+                    m.activeWorkspace.name = current_active_ws.to_string();
+                }
+            }
+        } else {
+            for m in &updated_monitors {
+                if m.focused {
+                    st.active_workspace = m.activeWorkspace.id;
+                    break;
+                }
             }
         }
+        st.monitors = updated_monitors;
     }
 
     pub fn start_listener(&self) {
@@ -299,6 +324,22 @@ impl HyprlandIpc {
             // Initial state population
             Self::refresh_state(&state).await;
 
+            // Background debounced state refresh worker to avoid blocking the event loop
+            let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<()>(32);
+            let bg_state = state.clone();
+            let bg_event_tx = event_tx.clone();
+
+            tokio::spawn(async move {
+                while refresh_rx.recv().await.is_some() {
+                    // Debounce rapid window/layout events (e.g. app launch)
+                    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+                    while refresh_rx.try_recv().is_ok() {}
+
+                    Self::refresh_state(&bg_state).await;
+                    let _ = bg_event_tx.send(HyprEvent::LayoutConfigChanged);
+                }
+            });
+
             loop {
                 match UnixStream::connect(&socket2_path).await {
                     Ok(stream) => {
@@ -311,72 +352,103 @@ impl HyprlandIpc {
                                 match event_name {
                                     "workspace" => {
                                         let id = data.parse::<i32>().unwrap_or(1);
-                                        {
-                                            let mut st = state.write().await;
+                                        let changed = {
+                                            let mut st = match state.write() {
+                                                Ok(s) => s,
+                                                Err(e) => e.into_inner(),
+                                            };
+                                            st.urgent_workspaces.retain(|&w| w != id);
+                                            let mut any_changed = st.active_workspace != id;
                                             st.active_workspace = id;
+                                            let single_mon = st.monitors.len() == 1;
                                             for m in &mut st.monitors {
-                                                if m.focused {
-                                                    m.activeWorkspace.id = id;
-                                                    m.activeWorkspace.name = data.to_string();
+                                                if m.focused || single_mon {
+                                                    if m.activeWorkspace.id != id {
+                                                        any_changed = true;
+                                                        m.activeWorkspace.id = id;
+                                                        m.activeWorkspace.name = data.to_string();
+                                                    }
                                                 }
                                             }
+                                            any_changed
+                                        };
+                                        if changed {
+                                            let _ = event_tx.send(HyprEvent::WorkspaceChanged {
+                                                id,
+                                                name: data.to_string(),
+                                            });
                                         }
-                                        Self::refresh_state(&state).await;
-                                        let _ = event_tx.send(HyprEvent::WorkspaceChanged {
-                                            id,
-                                            name: data.to_string(),
-                                        });
                                     }
                                     "workspacev2" => {
                                         if let Some((id_str, name)) = data.split_once(',') {
                                             let id = id_str.parse::<i32>().unwrap_or(1);
-                                            {
-                                                let mut st = state.write().await;
+                                            let changed = {
+                                                let mut st = match state.write() {
+                                                    Ok(s) => s,
+                                                    Err(e) => e.into_inner(),
+                                                };
+                                                st.urgent_workspaces.retain(|&w| w != id);
+                                                let mut any_changed = st.active_workspace != id;
                                                 st.active_workspace = id;
+                                                let single_mon = st.monitors.len() == 1;
                                                 for m in &mut st.monitors {
-                                                    if m.focused {
-                                                        m.activeWorkspace.id = id;
-                                                        m.activeWorkspace.name = name.to_string();
+                                                    if m.focused || single_mon {
+                                                        if m.activeWorkspace.id != id || m.activeWorkspace.name != name {
+                                                            any_changed = true;
+                                                            m.activeWorkspace.id = id;
+                                                            m.activeWorkspace.name = name.to_string();
+                                                        }
                                                     }
                                                 }
+                                                any_changed
+                                            };
+                                            if changed {
+                                                let _ = event_tx.send(HyprEvent::WorkspaceChanged {
+                                                    id,
+                                                    name: name.to_string(),
+                                                });
                                             }
-                                            Self::refresh_state(&state).await;
-                                            let _ = event_tx.send(HyprEvent::WorkspaceChanged {
-                                                id,
-                                                name: name.to_string(),
-                                            });
                                         }
                                     }
                                     "focusedmon" => {
                                         if let Some((mon, ws_str)) = data.split_once(',') {
                                             let ws_id = ws_str.parse::<i32>().unwrap_or(1);
-                                            {
-                                                let mut st = state.write().await;
+                                            let changed = {
+                                                let mut st = match state.write() {
+                                                    Ok(s) => s,
+                                                    Err(e) => e.into_inner(),
+                                                };
+                                                let mut any_changed = st.active_workspace != ws_id;
                                                 st.active_workspace = ws_id;
                                                 for m in &mut st.monitors {
+                                                    let was_focused = m.focused;
                                                     m.focused = m.name == mon;
+                                                    if was_focused != m.focused {
+                                                        any_changed = true;
+                                                    }
                                                     if m.name == mon {
-                                                        m.activeWorkspace.id = ws_id;
-                                                        m.activeWorkspace.name = ws_str.to_string();
+                                                        if m.activeWorkspace.id != ws_id {
+                                                            any_changed = true;
+                                                            m.activeWorkspace.id = ws_id;
+                                                            m.activeWorkspace.name = ws_str.to_string();
+                                                        }
                                                     }
                                                 }
+                                                any_changed
+                                            };
+                                            if changed {
+                                                let _ = event_tx.send(HyprEvent::FocusedMonitorChanged {
+                                                    monitor: mon.to_string(),
+                                                    workspace_id: ws_id,
+                                                });
                                             }
-                                            Self::refresh_state(&state).await;
-                                            let _ = event_tx.send(HyprEvent::FocusedMonitorChanged {
-                                                monitor: mon.to_string(),
-                                                workspace_id: ws_id,
-                                            });
                                         }
                                     }
                                     "createworkspace" | "createworkspacev2"
                                     | "destroyworkspace" | "destroyworkspacev2"
                                     | "moveworkspace" | "moveworkspacev2"
                                     | "activespecial" => {
-                                        Self::refresh_state(&state).await;
-                                        let _ = event_tx.send(HyprEvent::WorkspaceChanged {
-                                            id: 0,
-                                            name: String::new(),
-                                        });
+                                        let _ = refresh_tx.try_send(());
                                     }
                                     "activewindow" => {
                                         let (class, title) = if let Some((c, t)) = data.split_once(',') {
@@ -385,7 +457,10 @@ impl HyprlandIpc {
                                             (String::new(), String::new())
                                         };
                                         {
-                                            let mut st = state.write().await;
+                                            let mut st = match state.write() {
+                                                Ok(s) => s,
+                                                Err(e) => e.into_inner(),
+                                            };
                                             st.active_window_class = class.clone();
                                             st.active_window_title = title.clone();
                                         }
@@ -394,16 +469,30 @@ impl HyprlandIpc {
                                     "openwindow" | "closewindow" | "movewindow" | "movewindowv2"
                                     | "windowtitle" | "windowtitlev2" | "changefloatingmode"
                                     | "fullscreen" | "pin" => {
-                                        Self::refresh_state(&state).await;
-                                        let _ = event_tx.send(HyprEvent::LayoutConfigChanged);
+                                        let _ = refresh_tx.try_send(());
                                     }
                                     "urgent" => {
+                                        let addr = data.trim();
+                                        {
+                                            let mut st = match state.write() {
+                                                Ok(s) => s,
+                                                Err(e) => e.into_inner(),
+                                            };
+                                            let ws_id = st.clients.iter()
+                                                .find(|c| c.address.trim_start_matches("0x").eq_ignore_ascii_case(addr.trim_start_matches("0x")))
+                                                .map(|c| c.workspace.id);
+                                            if let Some(w) = ws_id {
+                                                if !st.urgent_workspaces.contains(&w) {
+                                                    st.urgent_workspaces.push(w);
+                                                }
+                                            }
+                                        }
                                         let _ = event_tx.send(HyprEvent::UrgentWindow {
-                                            address: data.to_string(),
+                                            address: addr.to_string(),
                                         });
                                     }
                                     "configreloaded" => {
-                                        let _ = event_tx.send(HyprEvent::LayoutConfigChanged);
+                                        let _ = refresh_tx.try_send(());
                                     }
                                     _ => {}
                                 }

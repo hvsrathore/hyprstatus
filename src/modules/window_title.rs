@@ -1,24 +1,23 @@
 use crate::config::{parse_hex_color, Config};
 use crate::ipc::HyprState;
 use crate::modules::ModuleBlock;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 pub struct WindowTitleModule {
     state: Arc<RwLock<HyprState>>,
-    last_title: std::sync::RwLock<(String, String)>,
+    last_title: RwLock<(String, String)>,
 }
 
 impl WindowTitleModule {
     pub fn new(state: Arc<RwLock<HyprState>>) -> Self {
         Self {
             state,
-            last_title: std::sync::RwLock::new((String::new(), String::new())),
+            last_title: RwLock::new((String::new(), String::new())),
         }
     }
 
     pub fn render(&self, config: &Config) -> ModuleBlock {
-        let (class, title) = if let Ok(st) = self.state.try_read() {
+        let (class, title) = if let Ok(st) = self.state.read() {
             let pair = (st.active_window_class.clone(), st.active_window_title.clone());
             if let Ok(mut last) = self.last_title.write() {
                 *last = pair.clone();

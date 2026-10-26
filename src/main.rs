@@ -140,6 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for id in reg_ids {
                     state.render_bar(&qh, id);
                 }
+                let _ = conn.flush();
             }
             Ok(()) = config_rx.changed() => {
                 std::mem::drop(read_guard);
@@ -153,23 +154,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for id in reg_ids {
                     state.render_bar(&qh, id);
                 }
+                let _ = conn.flush();
             }
-            Ok(event) = hypr_rx.recv() => {
+            recv_res = hypr_rx.recv() => {
                 std::mem::drop(read_guard);
-                if state.has_visible_popover() {
-                    state.hide_all_popovers();
-                }
-                match event {
-                    HyprEvent::WorkspaceChanged { .. }
-                    | HyprEvent::ActiveWindowChanged { .. }
-                    | HyprEvent::FocusedMonitorChanged { .. }
-                    | HyprEvent::LayoutConfigChanged => {
-                        let reg_ids: Vec<u32> = state.bars.keys().copied().collect();
-                        for id in reg_ids {
-                            state.render_bar(&qh, id);
+                let should_render = match recv_res {
+                    Ok(event) => {
+                        if state.has_visible_popover() {
+                            state.hide_all_popovers();
                         }
+                        matches!(
+                            event,
+                            HyprEvent::WorkspaceChanged { .. }
+                            | HyprEvent::ActiveWindowChanged { .. }
+                            | HyprEvent::FocusedMonitorChanged { .. }
+                            | HyprEvent::LayoutConfigChanged
+                            | HyprEvent::UrgentWindow { .. }
+                        )
                     }
-                    _ => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => true,
+                    Err(_) => false,
+                };
+
+                if should_render {
+                    let reg_ids: Vec<u32> = state.bars.keys().copied().collect();
+                    for id in reg_ids {
+                        state.render_bar(&qh, id);
+                    }
+                    let _ = conn.flush();
                 }
             }
         }
