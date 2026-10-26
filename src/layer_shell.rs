@@ -1096,6 +1096,14 @@ impl BarState {
                             }
                             Err(e) => {
                                 eprintln!("[screenshot] Error capturing screenshot: {}", e);
+                                let hint = if e.contains("grim") || e.contains("No such file") {
+                                    "'grim' is not installed. Run: sudo pacman -S grim"
+                                } else {
+                                    &e
+                                };
+                                let _ = tokio::process::Command::new("hyprctl")
+                                    .args(["notify", "3", "5000", "rgb(f38ba8)", &format!("Screenshot error: {}", hint)])
+                                    .spawn();
                             }
                         }
                     });

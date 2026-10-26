@@ -128,20 +128,31 @@ impl ScreenshotModule {
         let filepath = expanded_dir.join(&filename);
         let filepath_str = filepath.to_string_lossy().to_string();
 
-        // Build grim command
-        // Note: grim captures Wayland outputs via wlr-screencopy, which captures the entire screen
-        // including layer-shell surfaces (the hyprstatus bar itself).
-        let mut cmd = tokio::process::Command::new("grim");
-        if !fullscreen_all {
-            if let Some(out) = output_name {
-                cmd.arg("-o").arg(out);
+        let custom_cmd = config.modules.screenshot.command.trim();
+        let status = if !custom_cmd.is_empty() {
+            let expanded_cmd = custom_cmd
+                .replace("{file}", &filepath_str)
+                .replace("{output}", output_name.unwrap_or(""));
+            tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&expanded_cmd)
+                .status()
+                .await
+                .map_err(|e| format!("Failed to run screenshot command '{}': {}", custom_cmd, e))?
+        } else {
+            // Default: grim captures Wayland outputs via wlr-screencopy
+            let mut cmd = tokio::process::Command::new("grim");
+            if !fullscreen_all {
+                if let Some(out) = output_name {
+                    cmd.arg("-o").arg(out);
+                }
             }
-        }
-        cmd.arg(&filepath_str);
+            cmd.arg(&filepath_str);
+            cmd.status().await.map_err(|e| format!("Failed to run grim: {}", e))?
+        };
 
-        let status = cmd.status().await.map_err(|e| format!("Failed to run grim: {}", e))?;
         if !status.success() {
-            return Err("grim exited with an error".to_string());
+            return Err("Screenshot capture exited with an error".to_string());
         }
 
         // Copy image to clipboard via wl-copy if enabled
@@ -165,19 +176,25 @@ impl ScreenshotModule {
             });
         }
 
-        // Desktop notification via notify-send if enabled
+        // Desktop notification via notify-send or hyprctl notify if enabled
         if config.modules.screenshot.notify {
             let fp = filepath_str.clone();
             let disp = filepath.display().to_string();
             tokio::spawn(async move {
-                let _ = tokio::process::Command::new("notify-send")
+                let sent = tokio::process::Command::new("notify-send")
                     .args([
                         "-a", "hyprstatus",
                         "-i", &fp,
                         "Screenshot Captured",
                         &format!("Saved to {}\nCopied to clipboard", disp),
                     ])
-                    .spawn();
+                    .status()
+                    .await;
+                if sent.is_err() || !sent.unwrap().success() {
+                    let _ = tokio::process::Command::new("hyprctl")
+                        .args(["notify", "-1", "4000", "rgb(a6e3a1)", &format!("Screenshot saved to {}", disp)])
+                        .spawn();
+                }
             });
         }
 

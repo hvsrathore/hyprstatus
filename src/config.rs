@@ -411,6 +411,8 @@ pub struct ScreenshotConfig {
     pub label: String,
     #[serde(default = "default_screenshot_directory")]
     pub save_directory: String,
+    #[serde(default = "default_screenshot_command")]
+    pub command: String,
     #[serde(default = "default_screenshot_copy_clipboard")]
     pub copy_to_clipboard: bool,
     #[serde(default = "default_screenshot_notify")]
@@ -425,6 +427,7 @@ impl Default for ScreenshotConfig {
             icon: default_screenshot_icon(),
             label: default_screenshot_label(),
             save_directory: default_screenshot_directory(),
+            command: default_screenshot_command(),
             copy_to_clipboard: default_screenshot_copy_clipboard(),
             notify: default_screenshot_notify(),
             all_monitors: default_screenshot_all_monitors(),
@@ -435,6 +438,7 @@ impl Default for ScreenshotConfig {
 fn default_screenshot_icon() -> String { "".to_string() }
 fn default_screenshot_label() -> String { "".to_string() }
 fn default_screenshot_directory() -> String { "~/Pictures/Screenshots".to_string() }
+fn default_screenshot_command() -> String { "".to_string() }
 fn default_screenshot_copy_clipboard() -> bool { true }
 fn default_screenshot_notify() -> bool { true }
 fn default_screenshot_all_monitors() -> bool { true }
