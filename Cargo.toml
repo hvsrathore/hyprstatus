@@ -1,6 +1,6 @@
 [package]
 name = "hyprstatus"
-version = "1.0.3"
+version = "1.0.4"
 edition = "2021"
 authors = ["Harsh Vardhan <4444hv@gmail.com>"]
 license = "MIT"
