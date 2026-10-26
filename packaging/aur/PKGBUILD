@@ -17,7 +17,7 @@ optdepends=(
     'ttf-jetbrains-mono-nerd: Default Nerd Font glyphs, icons, and sparklines'
 )
 source=("$pkgname-$pkgver.tar.gz::https://github.com/hvsrathore/hyprstatus/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('1e24be5a010951a4c0bd95d6b36080ac3317d5181a3e41e7b76bd1f8277e5f41')
+sha256sums=('1b2258166537a6c9a21d40f9b5e81bae57fa6193a44cf811588c49fc7d6c4bc7')
 
 prepare() {
     cd "$pkgname-$pkgver"
