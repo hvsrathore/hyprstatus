@@ -33,7 +33,7 @@
   <tr>
     <td width="50%">
       <h3>🚀 Blazing Fast & Zero Bloat</h3>
-      Pure Rust software rasterizer built on <code>fontdue</code> blitting directly to <code>wl_shm</code> shared memory. Idle memory usage is ~15-20 MB, CPU usage is near 0%, and frame draws finish in fractions of a millisecond.
+      Pure Rust software rasterizer built on <code>fontdue</code> blitting directly to <code>wl_shm</code> shared memory with full double-buffering. Idle memory usage is ~15-20 MB, CPU usage is near 0%, and frame draws finish in fractions of a millisecond without tearing or flickering.
     </td>
     <td width="50%">
       <h3>🪟 Interactive Window Wireframes</h3>
@@ -52,8 +52,8 @@
   </tr>
   <tr>
     <td width="50%">
-      <h3>📸 One-Click Full-Screen Screenshot</h3>
-      Dedicated status bar camera button (<code></code>) that captures the entire desktop canvas—<b>including the status bar and open popovers</b>—using <code>grim</code>, copies to Wayland clipboard (<code>wl-copy</code>), and notifies with thumbnail previews.
+      <h3>📸 One-Click Desktop Screenshot</h3>
+      Dedicated status bar camera button (<code></code>) that captures the entire desktop canvas—<b>including the status bar and open popovers</b>—using <code>grim</code> or a custom command, copies to Wayland clipboard (<code>wl-copy</code>), and notifies via <code>notify-send</code> or native Hyprland notifications.
     </td>
     <td width="50%">
       <h3>📈 Braille Performance Sparklines</h3>
@@ -66,8 +66,8 @@
       Full <code>zwlr_layer_shell_v1</code> support. Listens for Wayland output additions/removals and renders independent per-monitor bars with customized layouts (e.g., primary vs. secondary displays).
     </td>
     <td width="50%">
-      <h3>⚡ Instant TOML Hot-Reloading</h3>
-      Strongly-typed configuration at <code>~/.config/hyprstatus/config.toml</code> actively watched by an inotify background worker. Modifying colors, fonts, or widget orders updates instantly without restarting the daemon.
+      <h3>⚡ Tear-Free TOML Hot-Reloading</h3>
+      Strongly-typed configuration at <code>~/.config/hyprstatus/config.toml</code> watched by an intelligent inotify worker filtering out non-mutating events. Modifying colors, fonts, or widget orders updates smoothly in the background without restarting the daemon.
     </td>
   </tr>
 </table>
@@ -98,10 +98,11 @@ hyprstatus replaces clunky terminal launchers and heavyweight modals with bespok
 * **Direct Window Focus**: Clicking any window thumbnail dispatches focus directly to that client via Hyprland IPC (Lua dispatch `hl.dsp.focus` or legacy).
 
 ### 4. 📸 Instant Screenshot Button
-* **Full-Screen Capture (Includes Status Bar)**: Captures the entire composited screen using `grim`, including layer-shell surfaces and open popovers.
+* **Full-Screen Capture (Includes Status Bar)**: Captures the entire composited screen using `grim` (or your configured custom tool), including layer-shell surfaces and open popovers.
 * **Visual Flash Feedback**: The camera button flashes bright `#f9e2af` upon click.
 * **Dual Action**: Left-click captures the entire desktop across all monitors; Right-click captures only the clicked monitor.
-* **Automatic Clipboard & Notifications**: Immediately puts the image into your clipboard (`wl-copy`) and shows a desktop notification preview with dunst/mako/swaync.
+* **Automatic Clipboard & Notifications**: Immediately puts the image into your clipboard (`wl-copy`) and shows a notification preview via `notify-send` or Hyprland's native notification system (`hyprctl notify`).
+* **Custom Tool Support**: Customize the screenshot command in config with `{file}` and `{output}` placeholders (e.g. `wayshot`, `hyprshot`).
 
 ---
 
@@ -234,9 +235,10 @@ right = ["tray", "screenshot", "network", "audio", "battery", "clock"]
 [modules.screenshot]
 icon = ""
 label = ""                                 # Optional label beside icon
+command = ""                               # Custom command (empty defaults to grim, supports {file} & {output})
 save_directory = "~/Pictures/Screenshots"   # Where screenshots are saved
 copy_to_clipboard = true                   # Copy image to clipboard via wl-copy
-notify = true                              # Send notification via notify-send
+notify = true                              # Send notification via notify-send or hyprctl notify
 all_monitors = true                        # Left-click captures all monitors
 
 [modules.audio]
