@@ -13,7 +13,7 @@
 
 <br/>
 
-![hyprstatus banner](./assets/hyprland-banner.png)
+![hyprstatus banner](https://raw.githubusercontent.com/hvsrathore/hyprstatus/main/assets/hyprland-banner.png)
 
 <br/>
 
