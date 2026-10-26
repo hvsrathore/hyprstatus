@@ -520,7 +520,7 @@ pub fn load_or_create_config() -> Config {
 pub fn watch_config_file(config_tx: watch::Sender<Arc<Config>>) {
     let path = get_config_path();
     tokio::spawn(async move {
-        use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+        use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let mut watcher = match RecommendedWatcher::new(
             move |res| {
@@ -549,7 +549,15 @@ pub fn watch_config_file(config_tx: watch::Sender<Arc<Config>>) {
 
         println!("[config] Watching {} for hot-reloads", path.display());
 
+        let mut last_content = fs::read_to_string(&path).unwrap_or_default();
+
         while let Some(event) = rx.recv().await {
+            // Ignore pure read/access events to prevent infinite feedback loops
+            match event.kind {
+                EventKind::Modify(_) | EventKind::Create(_) => {}
+                _ => continue,
+            }
+
             let matches = event.paths.iter().any(|p| p == &path);
             if matches {
                 tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
@@ -557,8 +565,12 @@ pub fn watch_config_file(config_tx: watch::Sender<Arc<Config>>) {
                 while let Ok(_) = rx.try_recv() {}
 
                 if let Ok(content) = fs::read_to_string(&path) {
+                    if content == last_content {
+                        continue;
+                    }
                     match toml::from_str::<Config>(&content) {
                         Ok(new_cfg) => {
+                            last_content = content;
                             println!("[config] Hot-reloaded configuration successfully!");
                             let _ = config_tx.send(Arc::new(new_cfg));
                         }

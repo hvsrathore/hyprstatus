@@ -7,11 +7,15 @@ use tokio::sync::RwLock;
 
 pub struct WorkspaceModule {
     state: Arc<RwLock<HyprState>>,
+    last_render_data: std::sync::RwLock<Option<(i32, HashSet<i32>, Vec<i32>, i32)>>,
 }
 
 impl WorkspaceModule {
     pub fn new(state: Arc<RwLock<HyprState>>) -> Self {
-        Self { state }
+        Self {
+            state,
+            last_render_data: std::sync::RwLock::new(None),
+        }
     }
 
     pub fn get_clients_for_workspace(&self, ws_id: i32) -> Vec<HyprClient> {
@@ -48,7 +52,13 @@ impl WorkspaceModule {
 
                 let urg: HashSet<i32> = st.urgent_workspaces.iter().copied().collect();
 
-                (st.active_workspace, urg, sorted_ids, mon_ws)
+                let data = (st.active_workspace, urg, sorted_ids, mon_ws);
+                if let Ok(mut last) = self.last_render_data.write() {
+                    *last = Some(data.clone());
+                }
+                data
+            } else if let Ok(guard) = self.last_render_data.read() {
+                guard.clone().unwrap_or_else(|| (1, HashSet::new(), vec![1, 2, 3, 4, 5], 1))
             } else {
                 (1, HashSet::new(), vec![1, 2, 3, 4, 5], 1)
             }

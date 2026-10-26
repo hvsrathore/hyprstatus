@@ -3,7 +3,7 @@ use crate::modules::{ClickAction, ClickRegion, ModuleBlock};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock as StdRwLock};
 use std::time::Instant;
 use tokio::sync::RwLock;
 
@@ -41,7 +41,7 @@ impl Default for NetState {
 
 #[derive(Clone)]
 pub struct NetworkModule {
-    state: Arc<RwLock<NetState>>,
+    state: Arc<StdRwLock<NetState>>,
     cached_networks: Arc<RwLock<Vec<crate::modules::popup::WifiNetworkItem>>>,
     wifi_enabled: Arc<std::sync::atomic::AtomicBool>,
     status_message: Arc<RwLock<Option<String>>>,
@@ -52,7 +52,7 @@ pub struct NetworkModule {
 
 impl NetworkModule {
     pub fn new() -> Self {
-        let state = Arc::new(RwLock::new(NetState::default()));
+        let state = Arc::new(StdRwLock::new(NetState::default()));
         let cached_networks = Arc::new(RwLock::new(Self::query_wifi_networks_sync()));
         let wifi_enabled = Arc::new(std::sync::atomic::AtomicBool::new(Self::is_wifi_enabled_sync()));
         let status_message = Arc::new(RwLock::new(None));
@@ -74,7 +74,7 @@ impl NetworkModule {
     }
 
     pub fn get_state(&self) -> NetState {
-        self.state.try_read().map(|s| s.clone()).unwrap_or_default()
+        self.state.read().map(|s| s.clone()).unwrap_or_default()
     }
 
     pub fn get_cached_networks(&self) -> Vec<crate::modules::popup::WifiNetworkItem> {
@@ -442,7 +442,7 @@ impl NetworkModule {
 
     fn spawn_monitor(
         &self,
-        state: Arc<RwLock<NetState>>,
+        state: Arc<StdRwLock<NetState>>,
         cached_networks: Arc<RwLock<Vec<crate::modules::popup::WifiNetworkItem>>>,
         wifi_enabled: Arc<std::sync::atomic::AtomicBool>,
     ) {
@@ -505,7 +505,7 @@ impl NetworkModule {
                 last_tx = current_tx;
 
                 {
-                    let mut st = state.write().await;
+                    let mut st = state.write().unwrap();
                     *st = current_state;
                 }
 
@@ -641,13 +641,7 @@ impl NetworkModule {
     }
 
     pub fn render(&self, config: &Config) -> ModuleBlock {
-        let st = {
-            if let Ok(guard) = self.state.try_read() {
-                guard.clone()
-            } else {
-                NetState::default()
-            }
-        };
+        let st = self.state.read().map(|guard| guard.clone()).unwrap_or_default();
 
         let (icon, text) = match st.net_type {
             NetType::Wifi => {

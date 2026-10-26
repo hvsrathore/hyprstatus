@@ -145,8 +145,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::mem::drop(read_guard);
                 let new_cfg = config_rx.borrow().clone();
                 println!("[main] Applying hot-reloaded configuration to status bars");
+                if new_cfg.bar.font_path != state.config.bar.font_path {
+                    state.renderer = renderer::SoftwareRenderer::new(&new_cfg.bar.font_path);
+                }
                 state.config = new_cfg.clone();
-                state.renderer = renderer::SoftwareRenderer::new(&new_cfg.bar.font_path);
                 let reg_ids: Vec<u32> = state.bars.keys().copied().collect();
                 for id in reg_ids {
                     state.render_bar(&qh, id);

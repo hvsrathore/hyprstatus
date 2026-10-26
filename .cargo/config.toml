@@ -1,4 +1,4 @@
 [env]
-LIBCLANG_PATH = "/home/hvsr/.local/lib"
-LD_LIBRARY_PATH = { value = "/home/hvsr/.local/lib", relative = false }
+LIBCLANG_PATH = "/usr/lib"
+LD_LIBRARY_PATH = { value = "/usr/lib", relative = false }
 BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/lib/gcc/x86_64-pc-linux-gnu/16/include"

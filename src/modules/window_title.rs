@@ -6,20 +6,26 @@ use tokio::sync::RwLock;
 
 pub struct WindowTitleModule {
     state: Arc<RwLock<HyprState>>,
+    last_title: std::sync::RwLock<(String, String)>,
 }
 
 impl WindowTitleModule {
     pub fn new(state: Arc<RwLock<HyprState>>) -> Self {
-        Self { state }
+        Self {
+            state,
+            last_title: std::sync::RwLock::new((String::new(), String::new())),
+        }
     }
 
     pub fn render(&self, config: &Config) -> ModuleBlock {
-        let (class, title) = {
-            if let Ok(st) = self.state.try_read() {
-                (st.active_window_class.clone(), st.active_window_title.clone())
-            } else {
-                (String::new(), String::new())
+        let (class, title) = if let Ok(st) = self.state.try_read() {
+            let pair = (st.active_window_class.clone(), st.active_window_title.clone());
+            if let Ok(mut last) = self.last_title.write() {
+                *last = pair.clone();
             }
+            pair
+        } else {
+            self.last_title.read().map(|l| l.clone()).unwrap_or_default()
         };
 
         let max_len = 45;

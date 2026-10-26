@@ -2,8 +2,7 @@ use crate::config::{parse_hex_color, Config};
 use crate::modules::{ClickAction, ClickRegion, ModuleBlock};
 use crate::renderer::SoftwareRenderer;
 use std::fs;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 /// Fixed-size ring buffer for rolling time-series data
 #[derive(Debug, Clone)]
@@ -106,11 +105,11 @@ impl PerfModule {
                                 let usage = ((d_total - d_idle) / d_total).clamp(0.0, 1.0);
 
                                 {
-                                    let mut hist = cpu_hist.write().await;
+                                    let mut hist = cpu_hist.write().unwrap();
                                     hist.push(usage);
                                 }
                                 {
-                                    let mut val = last_cpu.write().await;
+                                    let mut val = last_cpu.write().unwrap();
                                     *val = usage * 100.0;
                                 }
                             }
@@ -143,11 +142,11 @@ impl PerfModule {
                         let usage = (used as f32 / mem_total as f32).clamp(0.0, 1.0);
 
                         {
-                            let mut hist = mem_hist.write().await;
+                            let mut hist = mem_hist.write().unwrap();
                             hist.push(usage);
                         }
                         {
-                            let mut val = last_mem.write().await;
+                            let mut val = last_mem.write().unwrap();
                             *val = usage * 100.0;
                         }
                     }
@@ -159,11 +158,11 @@ impl PerfModule {
     }
 
     pub fn render(&self, config: &Config) -> ModuleBlock {
-        let cpu_vec = self.cpu_history.try_read().map(|h| h.to_vec()).unwrap_or_default();
-        let mem_vec = self.mem_history.try_read().map(|h| h.to_vec()).unwrap_or_default();
+        let cpu_vec = self.cpu_history.read().map(|h| h.to_vec()).unwrap_or_default();
+        let mem_vec = self.mem_history.read().map(|h| h.to_vec()).unwrap_or_default();
 
-        let cpu_pct = self.last_cpu_percent.try_read().map(|v| *v).unwrap_or(0.0);
-        let mem_pct = self.last_mem_percent.try_read().map(|v| *v).unwrap_or(0.0);
+        let cpu_pct = self.last_cpu_percent.read().map(|v| *v).unwrap_or(0.0);
+        let mem_pct = self.last_mem_percent.read().map(|v| *v).unwrap_or(0.0);
 
         let cpu_sparkline = SoftwareRenderer::render_braille_sparkline(&cpu_vec, 1.0);
         let mem_sparkline = SoftwareRenderer::render_braille_sparkline(&mem_vec, 1.0);

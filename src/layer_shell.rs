@@ -81,13 +81,15 @@ pub struct BarOutput {
     pub surface: wl_surface::WlSurface,
     pub layer_surface: ZwlrLayerSurfaceV1,
     pub configured: bool,
-    pub buffer: Option<ShmBuffer>,
+    pub buffers: [Option<ShmBuffer>; 2],
+    pub current_buffer_idx: usize,
     pub click_regions: Vec<ClickRegion>,
     // Popover state for this output (workspace preview, audio quick menu, wifi quick menu)
     pub popover: BarPopover,
     pub popup_surface: Option<wl_surface::WlSurface>,
     pub popup_layer_surface: Option<ZwlrLayerSurfaceV1>,
-    pub popup_buffer: Option<ShmBuffer>,
+    pub popup_buffers: [Option<ShmBuffer>; 2],
+    pub popup_current_buffer_idx: usize,
     pub popup_configured: bool,
 
     // Backdrop for click-outside dismissal
@@ -245,12 +247,14 @@ impl BarState {
                 surface,
                 layer_surface,
                 configured: false,
-                buffer: None,
+                buffers: [None, None],
+                current_buffer_idx: 0,
                 click_regions: Vec::new(),
                 popover: BarPopover::new(),
                 popup_surface: None,
                 popup_layer_surface: None,
-                popup_buffer: None,
+                popup_buffers: [None, None],
+                popup_current_buffer_idx: 0,
                 popup_configured: false,
                 backdrop_surface: None,
                 backdrop_layer_surface: None,
@@ -316,15 +320,16 @@ impl BarState {
             None => return,
         };
 
-        // Ensure buffer exists and matches dimensions
+        // Ensure back buffer exists and matches dimensions for tear-free double buffering
         let bar = match self.bars.get_mut(&registry_id) {
             Some(b) => b,
             None => return,
         };
 
-        if bar.buffer.as_ref().map_or(true, |b| b.width != width || b.height != height) {
+        let next_idx = 1 - bar.current_buffer_idx;
+        if bar.buffers[next_idx].as_ref().map_or(true, |b| b.width != width || b.height != height) {
             match ShmBuffer::new(shm, qh, width, height) {
-                Ok(b) => bar.buffer = Some(b),
+                Ok(b) => bar.buffers[next_idx] = Some(b),
                 Err(e) => {
                     eprintln!("[layer_shell] Failed to allocate shm buffer for bar: {}", e);
                     return;
@@ -332,7 +337,7 @@ impl BarState {
             }
         }
 
-        let buffer_entry = bar.buffer.as_mut().unwrap();
+        let buffer_entry = bar.buffers[next_idx].as_mut().unwrap();
         let pixel_buf = &mut buffer_entry.mmap[..];
 
         // Clear background
@@ -565,14 +570,15 @@ impl BarState {
             }
         }
 
-        // Update bar click regions and commit buffer
+        // Update bar click regions and commit back buffer atomically
         let bar = self.bars.get_mut(&registry_id).unwrap();
         bar.click_regions = click_regions;
 
-        let buf = &bar.buffer.as_ref().unwrap().buffer;
+        let buf = &bar.buffers[next_idx].as_ref().unwrap().buffer;
         bar.surface.attach(Some(buf), 0, 0);
         bar.surface.damage_buffer(0, 0, width as i32, height as i32);
         bar.surface.commit();
+        bar.current_buffer_idx = next_idx;
     }
 
     pub fn handle_pointer_click(&mut self, qh: &QueueHandle<Self>, button: MouseButton, x: i32, y: i32) {
@@ -1567,7 +1573,7 @@ impl BarState {
                 if let Some(s) = bar.popup_surface.take() {
                     s.destroy();
                 }
-                bar.popup_buffer = None;
+                bar.popup_buffers = [None, None];
 
                 if let Some(bls) = bar.backdrop_layer_surface.take() {
                     bls.destroy();
@@ -1618,10 +1624,11 @@ impl BarState {
 
         let pw = bar.popover.width;
         let ph = bar.popover.height;
+        let next_idx = 1 - bar.popup_current_buffer_idx;
 
-        if bar.popup_buffer.as_ref().map_or(true, |b| b.width != pw || b.height != ph) {
+        if bar.popup_buffers[next_idx].as_ref().map_or(true, |b| b.width != pw || b.height != ph) {
             match ShmBuffer::new(shm, qh, pw, ph) {
-                Ok(b) => bar.popup_buffer = Some(b),
+                Ok(b) => bar.popup_buffers[next_idx] = Some(b),
                 Err(e) => {
                     eprintln!("[layer_shell] Failed to allocate shm buffer for popup: {}", e);
                     return;
@@ -1629,7 +1636,7 @@ impl BarState {
             }
         }
 
-        let pbuf = bar.popup_buffer.as_mut().unwrap();
+        let pbuf = bar.popup_buffers[next_idx].as_mut().unwrap();
         bar.popover.render(&mut self.renderer, &mut pbuf.mmap[..], &self.config);
 
         if let Some(s) = &bar.popup_surface {
@@ -1637,6 +1644,7 @@ impl BarState {
             s.damage_buffer(0, 0, pw as i32, ph as i32);
             s.commit();
         }
+        bar.popup_current_buffer_idx = next_idx;
     }
 
     pub fn has_visible_popover(&self) -> bool {
@@ -1667,12 +1675,15 @@ impl BarState {
                     let sink_muted = self.mod_audio.state.sink_muted.load(std::sync::atomic::Ordering::Relaxed);
                     let source_muted = self.mod_audio.state.source_muted.load(std::sync::atomic::Ordering::Relaxed);
 
+                    let changed = audio.volume != vol || audio.sink_muted != sink_muted || audio.source_muted != source_muted;
                     if !self.pointer_pressed {
                         audio.volume = vol;
                     }
                     audio.sink_muted = sink_muted;
                     audio.source_muted = source_muted;
-                    needs_redraw.push(reg_id);
+                    if changed {
+                        needs_redraw.push(reg_id);
+                    }
                 }
                 PopoverKind::Wifi(wifi) => {
                     let enabled = self.mod_network.get_wifi_enabled();
@@ -2006,7 +2017,7 @@ impl Dispatch<ZwlrLayerSurfaceV1, u32> for BarState {
                         if let Some(s) = bar.popup_surface.take() {
                             s.destroy();
                         }
-                        bar.popup_buffer = None;
+                        bar.popup_buffers = [None, None];
                         bar.popup_configured = false;
                         bar.popover.visible = false;
                     }

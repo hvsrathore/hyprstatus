@@ -4,8 +4,7 @@ use crate::modules::ModuleBlock;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BatteryStatus {
@@ -80,7 +79,7 @@ impl BatteryModule {
                 }
 
                 {
-                    let mut guard = metrics.write().await;
+                    let mut guard = metrics.write().unwrap();
                     *guard = m;
                 }
 
@@ -166,13 +165,7 @@ impl BatteryModule {
     }
 
     pub fn render(&self, config: &Config) -> ModuleBlock {
-        let m = {
-            if let Ok(guard) = self.metrics.try_read() {
-                guard.clone()
-            } else {
-                BatteryMetrics::default()
-            }
-        };
+        let m = self.metrics.read().map(|g| g.clone()).unwrap_or_default();
 
         if m.status == BatteryStatus::ACOnly {
             let fg = parse_hex_color(&config.colors.battery_good);
